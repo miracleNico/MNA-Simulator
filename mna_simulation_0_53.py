@@ -1276,7 +1276,7 @@ def print_help_message():
 
     print("\n--- Example Netlist (for --entire paste) ---")
     print("""
-          V1 n1 0 FUNC np.exp(-t)
+          V1 n1 0 FUNC 10m np.exp(-t)
           R1 n1 n2 1k
           D1 n2 n3 1e-14
           C1 n2 n4 1u
@@ -1317,7 +1317,7 @@ def get_and_validate_netlist():
                 if line.strip().lower() == ".op":
                     simulation_mode = "DC_ANALYSIS"
                     continue
-                if line.strip().lower().startswith(".tran"):
+                elif line.strip().lower().startswith(".tran"):
                     simulation_mode = "TRAN_ANALYSIS"
                     tran_param = line.split()
                     if len(tran_param) == 3 :
@@ -1330,7 +1330,7 @@ def get_and_validate_netlist():
                     else:
                         error_handler("NETLIST_FATAL. Use .tran <time> (<step_time>).")
 
-                if line.strip().lower().startswith(".hb"):
+                elif line.strip().lower().startswith(".hb"):
                     simulation_mode = "HB_ANALYSIS"
                     hb_param = line.split()
                     args = hb_param[1:]
@@ -1354,14 +1354,16 @@ def get_and_validate_netlist():
                     simulation_param = [h_val, t_val]
                     continue
 
-                if line.strip().lower() == ".end":
+                elif line.strip().lower() == ".end":
                     break
-                if line.strip() == "":
+
+                elif line.strip() == "":
                     continue
 
-                parts = line.split()
-                comp = Component(parts)
-                cur_netlist.add_component(comp)
+                else:
+                    parts = line.split()
+                    comp = Component(parts)
+                    cur_netlist.add_component(comp)
                 line_count += 1
 
             if not cur_netlist.get_components():
