@@ -1317,7 +1317,8 @@ def get_and_validate_netlist():
                 if line.strip().lower() == ".op":
                     simulation_mode = "DC_ANALYSIS"
                     continue
-                elif line.strip().lower().startswith(".tran"):
+
+                if line.strip().lower().startswith(".tran"):
                     simulation_mode = "TRAN_ANALYSIS"
                     tran_param = line.split()
                     if len(tran_param) == 3 :
@@ -1329,8 +1330,9 @@ def get_and_validate_netlist():
                         simulation_param = [tran_time, '0.01m'] #Default step if not provided
                     else:
                         error_handler("NETLIST_FATAL. Use .tran <time> (<step_time>).")
+                    continue
 
-                elif line.strip().lower().startswith(".hb"):
+                if line.strip().lower().startswith(".hb"):
                     simulation_mode = "HB_ANALYSIS"
                     hb_param = line.split()
                     args = hb_param[1:]
@@ -1360,10 +1362,10 @@ def get_and_validate_netlist():
                 elif line.strip() == "":
                     continue
 
-                else:
-                    parts = line.split()
-                    comp = Component(parts)
-                    cur_netlist.add_component(comp)
+                
+                parts = line.split()
+                comp = Component(parts)
+                cur_netlist.add_component(comp)
                 line_count += 1
 
             if not cur_netlist.get_components():
