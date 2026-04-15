@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mna-simulation"
+version = "0.60.0"
+description = "Layered MNA circuit simulator with CLI, API, and schematic UI scaffold."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "numpy",
+  "sympy",
+  "matplotlib",
+  "pydantic>=2,<3",
+  "fastapi>=0.100,<1",
+  "uvicorn>=0.20,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8,<9",
+  "httpx>=0.27,<1",
+]
+
+[project.scripts]
+mna-sim = "mna_simulation.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["mna_simulation*"]
