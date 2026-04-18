@@ -9,6 +9,7 @@ import numpy as np
 from .contracts import AnalysisRequest, SimulationResponse
 from ..backends.python_backend import PythonBackend
 from ..errors import CircuitSimulatorError
+from ..schematic_pipeline import schematic_to_circuit_ir
 from ..utils import ndarray_to_list
 
 
@@ -21,9 +22,22 @@ class SimulationService:
     def run_request(self, request: AnalysisRequest) -> SimulationResponse:
         """Run a request and convert the result to a JSON-safe response."""
 
-        circuit = self.backend.parse_text(request.netlist_text)
+        generated_netlist: str | None = None
+        if request.schematic is not None:
+            converted = schematic_to_circuit_ir(
+                schematic=request.schematic,
+                mode_override=request.mode,
+                option_overrides=request.options,
+            )
+            circuit = converted.circuit
+            generated_netlist = converted.netlist_text
+        else:
+            circuit = self.backend.parse_text(request.netlist_text)
         options = self.backend.build_options(circuit, overrides=request.options, mode=request.mode)
         result = self.backend.run(circuit, options)
+        if generated_netlist is not None:
+            result.metadata = dict(result.metadata)
+            result.metadata["generated_netlist"] = generated_netlist
 
         waveform = None
         if result.waveform is not None:

@@ -31,13 +31,18 @@ class PythonBackend:
         return parse_netlist_file(path)
 
     def build_options(self, circuit: CircuitIR, overrides: dict | None = None, mode: AnalysisMode | None = None) -> AnalysisOptions:
-        directive: DirectiveRecord = select_analysis(circuit, fallback=mode or AnalysisMode.SHOW_MATRIX)
+        # ``.dyn`` is a UI-only mode that is executed as a ``.tran`` on the backend;
+        # the realtime streaming pace is controlled by the ``/ws/dyn`` endpoint.
+        effective_mode = mode
+        if effective_mode == AnalysisMode.DYN:
+            effective_mode = AnalysisMode.TRAN
+        directive: DirectiveRecord = select_analysis(circuit, fallback=effective_mode or AnalysisMode.SHOW_MATRIX)
         option_values = dict(directive.params)
         if overrides:
             option_values.update(overrides)
 
         return AnalysisOptions(
-            mode=mode or directive.mode,
+            mode=effective_mode or directive.mode,
             gmin_steps=option_values.get("gmin_steps", DEFAULT_GMIN_STEPS),
             max_iter=int(option_values.get("max_iter", 10000)),
             v_tol=float(option_values.get("v_tol", 1e-9)),

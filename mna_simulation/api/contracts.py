@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class AnalysisMode(str, Enum):
@@ -16,6 +16,7 @@ class AnalysisMode(str, Enum):
     TRAN = "tran"
     AC = "ac"
     HB = "hb"
+    DYN = "dyn"
 
 
 @dataclass(slots=True)
@@ -149,7 +150,7 @@ class AnalysisRequest(BaseModel):
     netlist_text: str = Field(default="", description="Raw netlist text.")
     mode: AnalysisMode | None = Field(default=None)
     options: dict[str, Any] = Field(default_factory=dict)
-    schematic: dict[str, Any] | None = None
+    schematic: "SchematicDocument | None" = None
 
 
 class SimulationResponse(BaseModel):
@@ -164,3 +165,128 @@ class SimulationResponse(BaseModel):
     waveform: dict[str, Any] | None = None
     spectrum: dict[str, Any] | None = None
     matrices: dict[str, object] | None = None
+
+
+class SchematicPosition(BaseModel):
+    """Canvas position for components or junctions."""
+
+    x: float
+    y: float
+
+
+class SchematicComponent(BaseModel):
+    """Schematic component node sent from the frontend graph."""
+
+    id: str
+    type: Literal["R", "C", "L", "V", "I", "D", "GND", "VCVS", "VCCS", "CCCS", "CCVS", "SUBCKT"]
+    name: str | None = None
+    value: str | None = None
+    subtype: str | None = None
+    value2: str | None = None
+    value3: str | None = None
+    position: SchematicPosition | None = None
+    # Controlled source extras.
+    ctrl_node1: str | None = None
+    ctrl_node2: str | None = None
+    ctrl_source: str | None = None
+    # Hierarchy: when type == SUBCKT, subcircuit_id refers to a SchematicDocument in the library.
+    subcircuit_id: str | None = None
+    # Pin names for SUBCKT instances (order-preserving). For primitive types this is ignored.
+    pins: list[str] | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def set_defaults(self) -> "SchematicComponent":
+        defaults = {
+            "R": "1k",
+            "C": "1u",
+            "L": "1m",
+            "V": "1",
+            "I": "1m",
+            "D": "1e-15",
+        }
+        if self.type in defaults and (self.value is None or str(self.value).strip() == ""):
+            self.value = defaults[self.type]
+        if self.type in {"V", "I"}:
+            self.subtype = (self.subtype or "DC").upper()
+        else:
+            self.subtype = None
+        return self
+
+
+class SchematicEndpoint(BaseModel):
+    """Wire endpoint reference."""
+
+    kind: Literal["component_pin", "junction"]
+    component_id: str | None = None
+    pin: str | None = None
+    junction_id: str | None = None
+
+    @model_validator(mode="after")
+    def validate_endpoint(self) -> "SchematicEndpoint":
+        if self.kind == "component_pin":
+            if not self.component_id or not self.pin:
+                raise ValueError("component_pin endpoint requires component_id and pin.")
+            self.junction_id = None
+        else:
+            if not self.junction_id:
+                raise ValueError("junction endpoint requires junction_id.")
+            self.component_id = None
+            self.pin = None
+        return self
+
+
+class SchematicWire(BaseModel):
+    """Connection segment in the schematic graph."""
+
+    id: str
+    start: SchematicEndpoint
+    end: SchematicEndpoint
+
+
+class SchematicJunction(BaseModel):
+    """Optional explicit junction node."""
+
+    id: str
+    position: SchematicPosition | None = None
+
+
+class SchematicAnalysis(BaseModel):
+    """Analysis command stored on the schematic document."""
+
+    mode: AnalysisMode = AnalysisMode.OP
+    params: dict[str, Any] = Field(default_factory=dict)
+
+
+class SchematicDocument(BaseModel):
+    """Backend-owned schematic graph format."""
+
+    components: list[SchematicComponent]
+    wires: list[SchematicWire] = Field(default_factory=list)
+    junctions: list[SchematicJunction] = Field(default_factory=list)
+    analysis: SchematicAnalysis | None = None
+    title: str | None = None
+    # Library of sub-schematics keyed by subcircuit_id (for SUBCKT components above).
+    subcircuits: dict[str, "SchematicDocument"] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_unique_ids(self) -> "SchematicDocument":
+        component_ids = [component.id for component in self.components]
+        if len(component_ids) != len(set(component_ids)):
+            raise ValueError("Schematic component ids must be unique.")
+        junction_ids = [junction.id for junction in self.junctions]
+        if len(junction_ids) != len(set(junction_ids)):
+            raise ValueError("Schematic junction ids must be unique.")
+        wire_ids = [wire.id for wire in self.wires]
+        if len(wire_ids) != len(set(wire_ids)):
+            raise ValueError("Schematic wire ids must be unique.")
+        return self
+
+
+class SimulationDemoPreset(BaseModel):
+    """Serializable preset schematic used by demo clients."""
+
+    id: str
+    title: str
+    description: str
+    schematic: SchematicDocument
