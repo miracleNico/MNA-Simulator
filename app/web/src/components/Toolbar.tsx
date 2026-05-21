@@ -12,6 +12,7 @@ type Props = {
 };
 
 const REGULAR: DeviceType[] = ["R", "C", "L", "V", "I", "D", "GND"];
+const TRANSISTORS: DeviceType[] = ["QNPN", "QPNP", "NMOS", "PMOS"];
 const CONTROLLED: DeviceType[] = ["VCVS", "VCCS", "CCCS", "CCVS"];
 
 export function Toolbar(props: Props) {
@@ -20,6 +21,17 @@ export function Toolbar(props: Props) {
       <div className="toolGroup">
         <span className="toolGroup__label">Components</span>
         {REGULAR.map((t) => (
+          <DeviceButton
+            key={t}
+            type={t}
+            active={props.pendingDevice === t}
+            onClick={() => props.onPickDevice(props.pendingDevice === t ? null : t)}
+          />
+        ))}
+      </div>
+      <div className="toolGroup">
+        <span className="toolGroup__label">Transistors</span>
+        {TRANSISTORS.map((t) => (
           <DeviceButton
             key={t}
             type={t}

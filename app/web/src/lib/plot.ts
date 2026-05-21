@@ -19,6 +19,8 @@ export type PlotData = {
   xLabel?: string;
   yLabel?: string;
   title?: string;
+  /** Line for sweeps/waveforms, stem for discrete spectra. */
+  kind?: "line" | "stem";
   /** Display x in log scale (AC sweeps). */
   logX?: boolean;
   /** Display y in log scale. */
@@ -52,17 +54,19 @@ export function drawPlot(ctx: CanvasRenderingContext2D, w: number, h: number, da
 
   // Axis ranges
   const xs = data.x;
-  const allYs = data.series.flatMap((s) => s.values);
+  const allYs = data.series.flatMap((s) => s.values).filter((v) => Number.isFinite(v));
   if (xs.length < 2 || allYs.length === 0) {
     drawEmptyState(ctx, w, h, "no samples yet");
     return;
   }
 
-  let xMin = xs[0];
-  let xMax = xs[xs.length - 1];
+  const useLogX = !!data.logX && xs.some((v) => v > 0);
+  const xFinite = xs.filter((v) => Number.isFinite(v) && (!useLogX || v > 0));
+  let xMin = Math.min(...xFinite);
+  let xMax = Math.max(...xFinite);
   if (xMin === xMax) xMax = xMin + 1;
 
-  let yMin = Math.min(...allYs);
+  let yMin = data.kind === "stem" ? Math.min(0, ...allYs) : Math.min(...allYs);
   let yMax = Math.max(...allYs);
   if (yMin === yMax) {
     yMin -= 1;
@@ -79,12 +83,12 @@ export function drawPlot(ctx: CanvasRenderingContext2D, w: number, h: number, da
   ctx.font = "10px Inter, system-ui, sans-serif";
   ctx.lineWidth = 1;
 
-  const xTicks = niceTicks(xMin, xMax, 6);
+  const xTicks = useLogX ? logTicks(xMin, xMax) : niceTicks(xMin, xMax, 6);
   const yTicks = niceTicks(yMin, yMax, 5);
 
   ctx.beginPath();
   for (const tv of xTicks) {
-    const px = padL + ((tv - xMin) / (xMax - xMin)) * plotW;
+    const px = scaleX(tv, xMin, xMax, plotW, padL, useLogX);
     ctx.moveTo(px, padT);
     ctx.lineTo(px, padT + plotH);
   }
@@ -112,7 +116,7 @@ export function drawPlot(ctx: CanvasRenderingContext2D, w: number, h: number, da
   ctx.textAlign = "center";
   ctx.textBaseline = "top";
   for (const tv of xTicks) {
-    const px = padL + ((tv - xMin) / (xMax - xMin)) * plotW;
+    const px = scaleX(tv, xMin, xMax, plotW, padL, useLogX);
     ctx.fillText(formatTick(tv), px, padT + plotH + 6);
   }
   ctx.textAlign = "right";
@@ -153,17 +157,44 @@ export function drawPlot(ctx: CanvasRenderingContext2D, w: number, h: number, da
     const color = series.color ?? PALETTE[sIdx % PALETTE.length];
     ctx.save();
     ctx.strokeStyle = color;
-    ctx.lineWidth = 1.6;
+    ctx.lineWidth = data.kind === "stem" ? 1.2 : 1.6;
     ctx.lineJoin = "round";
-    ctx.beginPath();
     const n = Math.min(series.values.length, xs.length);
-    for (let i = 0; i < n; i++) {
-      const x = padL + ((xs[i] - xMin) / (xMax - xMin)) * plotW;
-      const y = padT + plotH - ((series.values[i] - yMin) / (yMax - yMin)) * plotH;
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
+    if (data.kind === "stem") {
+      const baseline = padT + plotH - ((0 - yMin) / (yMax - yMin)) * plotH;
+      const offset = (sIdx - (data.series.length - 1) / 2) * 5;
+      for (let i = 0; i < n; i++) {
+        if (!Number.isFinite(xs[i]) || !Number.isFinite(series.values[i])) continue;
+        const x = scaleX(xs[i], xMin, xMax, plotW, padL, useLogX) + offset;
+        const y = padT + plotH - ((series.values[i] - yMin) / (yMax - yMin)) * plotH;
+        ctx.globalAlpha = 0.85;
+        ctx.beginPath();
+        ctx.moveTo(x, baseline);
+        ctx.lineTo(x, y);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.arc(x, y, 2.2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    } else {
+      ctx.beginPath();
+      let started = false;
+      for (let i = 0; i < n; i++) {
+        if (!Number.isFinite(xs[i]) || !Number.isFinite(series.values[i])) continue;
+        if (useLogX && xs[i] <= 0) continue;
+        const x = scaleX(xs[i], xMin, xMax, plotW, padL, useLogX);
+        const y = padT + plotH - ((series.values[i] - yMin) / (yMax - yMin)) * plotH;
+        if (!started) {
+          ctx.moveTo(x, y);
+          started = true;
+        } else {
+          ctx.lineTo(x, y);
+        }
+      }
+      ctx.stroke();
     }
-    ctx.stroke();
     ctx.restore();
   });
 
@@ -181,6 +212,32 @@ export function drawPlot(ctx: CanvasRenderingContext2D, w: number, h: number, da
     ctx.fillText(series.label, legendX + 14, legendY - 2);
     legendY += 14;
   });
+}
+
+function scaleX(
+  value: number,
+  min: number,
+  max: number,
+  width: number,
+  offset: number,
+  log: boolean
+): number {
+  if (!log) return offset + ((value - min) / (max - min)) * width;
+  const lo = Math.log10(min);
+  const hi = Math.log10(max);
+  return offset + ((Math.log10(value) - lo) / (hi - lo)) * width;
+}
+
+function logTicks(min: number, max: number): number[] {
+  const start = Math.floor(Math.log10(min));
+  const end = Math.ceil(Math.log10(max));
+  const ticks: number[] = [];
+  for (let e = start; e <= end; e++) {
+    const value = Math.pow(10, e);
+    if (value >= min && value <= max) ticks.push(value);
+  }
+  if (ticks.length < 2) return niceTicks(min, max, 6);
+  return ticks;
 }
 
 function drawEmptyState(ctx: CanvasRenderingContext2D, w: number, h: number, text: string) {

@@ -12,11 +12,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from mna_simulation.api.contracts import (
     AnalysisMode,
     AnalysisRequest,
+    SchematicAnalysis,
     SchematicDocument,
     SimulationResponse,
 )
 from mna_simulation.api.service import SimulationService
 from mna_simulation.errors import CircuitSimulatorError
+from mna_simulation.schematic_pipeline import schematic_to_circuit_ir
 
 app = FastAPI(title="MNA Simulation Service", version="0.60.0")
 app.add_middleware(
@@ -46,6 +48,52 @@ def simulate(request: AnalysisRequest) -> SimulationResponse:
         raise HTTPException(status_code=400, detail={"code": exc.code, "message": exc.message}) from exc
 
 
+def _resolve_pin_refs_to_labels(
+    schematic: SchematicDocument,
+    pin_refs: list[dict],
+    all_labels: list[str],
+) -> tuple[list[int], list[str]]:
+    """Translate ``pin_refs`` (component_id + pin) into label indices.
+
+    Uses the schematic pipeline's net_assignments to map each pin to a net name,
+    then finds the matching ``V(<net>)`` / ``I(<name>)`` labels. If a ref cannot
+    be resolved, it is silently skipped. If nothing resolves, returns all labels
+    so the client always has something to display.
+    """
+
+    if not pin_refs:
+        return list(range(len(all_labels))), list(all_labels)
+
+    try:
+        converted = schematic_to_circuit_ir(schematic=schematic)
+    except CircuitSimulatorError:
+        return list(range(len(all_labels))), list(all_labels)
+
+    net_map = converted.net_assignments  # pin_key -> net name (e.g. "n1", "0")
+    wanted_nets: list[str] = []
+    for ref in pin_refs:
+        cid = ref.get("component_id")
+        pin = ref.get("pin")
+        if not cid or not pin:
+            continue
+        key = f"cp:{cid}:{pin}"
+        net = net_map.get(key)
+        if net and net != "0":
+            wanted_nets.append(net)
+
+    idxs: list[int] = []
+    kept: list[str] = []
+    for i, lbl in enumerate(all_labels):
+        for n in wanted_nets:
+            if lbl == f"V({n})" or lbl.endswith(f"({n})"):
+                idxs.append(i)
+                kept.append(lbl)
+                break
+    if not idxs:
+        return list(range(len(all_labels))), list(all_labels)
+    return idxs, kept
+
+
 @app.websocket("/ws/dyn")
 async def dyn_stream(ws: WebSocket) -> None:
     """Realtime ``.dyn`` streaming endpoint.
@@ -53,13 +101,16 @@ async def dyn_stream(ws: WebSocket) -> None:
     Protocol (JSON messages):
         client -> {
             "schematic": SchematicDocument,
-            "speed": <s_per_s>,          # simulation seconds per wall-clock second
+            "speed": <s_per_s>,                    # sim seconds per wall-clock second
             "t_stop": "10m",
             "t_step": "0.1m",
-            "nodes": ["n1", "n2"]        # optional subset filter
+            "pin_refs": [{"component_id": "...", "pin": "p"}, ...],  # optional
+            "nodes": ["n1", ...],                  # optional, legacy label filter
+            "continuous": false                    # optional, loop playback forever
         }
-        server -> {"type": "meta", "labels": [...], "t_stop": <float>}
+        server -> {"type": "meta", "labels": [...], "t_stop": <float>, "speed": <float>, "sim_span": <float>, "continuous": <bool>}
         server -> {"type": "frame", "t": <float>, "values": [...] }   (many)
+        server -> {"type": "loop"}     # emitted between playback loops when continuous
         server -> {"type": "done"}
     """
 
@@ -76,12 +127,23 @@ async def dyn_stream(ws: WebSocket) -> None:
         speed = float(payload.get("speed", 1e-3))
         t_stop = payload.get("t_stop", "10m")
         t_step = payload.get("t_step", "0.1m")
-        node_filter = payload.get("nodes") or None
+        pin_refs = payload.get("pin_refs") or []
+        nodes_filter = payload.get("nodes") or []
+        continuous = bool(payload.get("continuous", False))
 
+        # Force the schematic to run as .tran with the requested params. Writing
+        # them into schematic.analysis (not options) means they hit the netlist
+        # emitter as text, then the netlist parser converts to floats — avoiding
+        # the "arange on StrDType" trap where string overrides clobber the parsed
+        # directive's floats inside build_options.
+        schematic.analysis = SchematicAnalysis(
+            mode=AnalysisMode.TRAN,
+            params={"t_stop": t_stop, "t_step": t_step},
+        )
         request = AnalysisRequest(
             netlist_text="",
             mode=AnalysisMode.TRAN,
-            options={"t_stop": t_stop, "t_step": t_step},
+            options={},
             schematic=schematic,
         )
         loop = asyncio.get_event_loop()
@@ -102,13 +164,31 @@ async def dyn_stream(ws: WebSocket) -> None:
         values = waveform["values"]
         labels = waveform["labels"]
 
-        idxs: list[int]
-        if node_filter:
-            idxs = [i for i, lbl in enumerate(labels) if lbl in node_filter]
+        # Detect shape: solver stores values[:, step] so nested list is
+        # (num_labels, num_time_points). core_advanced may return the transpose,
+        # so auto-detect from the dimensions.
+        num_labels = len(labels)
+        num_time = len(times)
+        inner_len = len(values[0]) if values and isinstance(values[0], list) else 0
+        is_label_major = len(values) == num_labels and inner_len == num_time
+        is_time_major = len(values) == num_time and inner_len == num_labels
+        if not (is_label_major or is_time_major):
+            # Heuristic: if outer dim matches num_time, treat as time-major.
+            is_time_major = len(values) == num_time
+
+        if pin_refs:
+            idxs, kept_labels = _resolve_pin_refs_to_labels(schematic, pin_refs, labels)
+        elif nodes_filter:
+            idxs = [i for i, lbl in enumerate(labels) if lbl in nodes_filter]
+            kept_labels = [labels[i] for i in idxs]
+            if not idxs:
+                idxs = list(range(len(labels)))
+                kept_labels = list(labels)
         else:
             idxs = list(range(len(labels)))
+            kept_labels = list(labels)
 
-        kept_labels = [labels[i] for i in idxs]
+        total_sim_span = (float(times[-1]) - float(times[0])) if times else 0.0
 
         await ws.send_text(
             json.dumps(
@@ -116,30 +196,75 @@ async def dyn_stream(ws: WebSocket) -> None:
                     "type": "meta",
                     "labels": kept_labels,
                     "t_stop": float(times[-1]) if times else 0.0,
+                    "sim_span": total_sim_span,
                     "speed": speed,
+                    "continuous": continuous,
                 }
             )
         )
 
-        t0_wall = time.monotonic()
-        t0_sim = float(times[0]) if times else 0.0
         effective_speed = speed if speed > 0 else 1e-3
 
-        for step_idx, t_sim in enumerate(times):
-            target_wall = t0_wall + (float(t_sim) - t0_sim) / effective_speed
-            now = time.monotonic()
-            if target_wall > now:
-                await asyncio.sleep(target_wall - now)
-            row = values[step_idx] if step_idx < len(values) else []
-            filtered = [row[i] if i < len(row) else 0.0 for i in idxs]
-            try:
-                await ws.send_text(
-                    json.dumps({"type": "frame", "t": float(t_sim), "values": filtered})
-                )
-            except WebSocketDisconnect:
-                return
+        async def stream_once(loop_wall0: float, sim_shift: float) -> bool:
+            """Send one full playback. Returns False if client disconnected."""
+            t0_sim_local = float(times[0]) if times else 0.0
+            for step_idx, t_sim in enumerate(times):
+                target_wall = loop_wall0 + (float(t_sim) - t0_sim_local) / effective_speed
+                now = time.monotonic()
+                if target_wall > now:
+                    try:
+                        await asyncio.sleep(target_wall - now)
+                    except asyncio.CancelledError:
+                        return False
+                if is_time_major:
+                    row = values[step_idx] if step_idx < len(values) else []
+                    filtered = [float(row[i]) if i < len(row) else 0.0 for i in idxs]
+                else:  # label-major (solver default: values[:, step])
+                    filtered = [
+                        float(values[lbl_idx][step_idx])
+                        if lbl_idx < len(values) and step_idx < len(values[lbl_idx])
+                        else 0.0
+                        for lbl_idx in idxs
+                    ]
+                try:
+                    await ws.send_text(
+                        json.dumps(
+                            {
+                                "type": "frame",
+                                "t": float(t_sim) + sim_shift,
+                                "values": filtered,
+                            }
+                        )
+                    )
+                except WebSocketDisconnect:
+                    return False
+                except RuntimeError:
+                    return False
+            return True
 
-        await ws.send_text(json.dumps({"type": "done"}))
+        t0_wall = time.monotonic()
+        if continuous:
+            sim_shift = 0.0
+            loop_idx = 0
+            while True:
+                loop_start_wall = t0_wall + (total_sim_span * loop_idx) / effective_speed
+                ok = await stream_once(loop_start_wall, sim_shift)
+                if not ok:
+                    return
+                try:
+                    await ws.send_text(json.dumps({"type": "loop"}))
+                except (WebSocketDisconnect, RuntimeError):
+                    return
+                sim_shift += total_sim_span
+                loop_idx += 1
+        else:
+            ok = await stream_once(t0_wall, 0.0)
+            if not ok:
+                return
+            try:
+                await ws.send_text(json.dumps({"type": "done"}))
+            except (WebSocketDisconnect, RuntimeError):
+                return
     except WebSocketDisconnect:
         return
     except Exception as exc:  # noqa: BLE001

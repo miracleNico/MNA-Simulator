@@ -107,6 +107,51 @@ textarea {
   background: var(--bg-2);
 }
 
+.menubar__item.open {
+  background: var(--bg-2);
+}
+
+.menubar__dropdown {
+  position: relative;
+  display: inline-block;
+}
+
+.menubar__dropdownPanel {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 4px;
+  min-width: 240px;
+  background: var(--bg-1, #131a26);
+  border: 1px solid var(--border-1, rgba(255,255,255,0.08));
+  border-radius: 8px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.4);
+  z-index: 50;
+  padding: 4px;
+}
+
+.menubar__dropdownItem {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--text-1);
+}
+.menubar__dropdownItem:hover {
+  background: var(--bg-2);
+}
+.menubar__dropdownDesc {
+  font-size: 11px;
+  color: var(--text-3, #7f8fa6);
+}
+
 .menubar__spacer {
   flex: 1;
 }

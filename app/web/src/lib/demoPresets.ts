@@ -1,4 +1,13 @@
-import { AnalysisState, CanvasComponent, CanvasWire, SchematicPreset, snap } from "./schematic";
+import {
+  AnalysisState,
+  CanvasComponent,
+  CanvasWire,
+  SchematicLevel,
+  SchematicPreset,
+  pinEndpoint,
+  pointEndpoint,
+  snap
+} from "./schematic";
 
 const defaultAnalysis: AnalysisState = {
   mode: "op",
@@ -8,8 +17,11 @@ const defaultAnalysis: AnalysisState = {
   fStop: "10000",
   points: 100,
   harmonics: 8,
+  hbTimeWindow: "",
   dynSpeed: "1m",
-  probeNodes: []
+  dynWindow: "5m",
+  probeNodes: [],
+  continuous: false
 };
 
 function cloneAnalysis(overrides: Partial<AnalysisState>): AnalysisState {
@@ -22,59 +34,252 @@ function mk(
   return { rotation: 0, ...partial, x: snap(partial.x), y: snap(partial.y) };
 }
 
-export const SCHEMATIC_PRESETS: SchematicPreset[] = [
-  {
-    id: "resistor-divider-op",
-    title: "Resistor Divider (.op)",
-    description: "A DC source feeding a resistor divider to ground.",
-    analysis: cloneAnalysis({ mode: "op" }),
-    components: [
-      mk({ id: "v-1", type: "V", name: "V1", value: "10", subtype: "DC", x: 200, y: 200 }),
-      mk({ id: "r-1", type: "R", name: "R1", value: "1k", x: 360, y: 160 }),
-      mk({ id: "r-2", type: "R", name: "R2", value: "2k", x: 500, y: 160 }),
-      mk({ id: "gnd-1", type: "GND", name: "GND1", value: "0", x: 200, y: 320 })
-    ],
-    wires: [
-      { id: "w1", start: { componentId: "v-1", pin: "n" }, end: { componentId: "gnd-1", pin: "g" } },
-      { id: "w2", start: { componentId: "v-1", pin: "p" }, end: { componentId: "r-1", pin: "p" } },
-      { id: "w3", start: { componentId: "r-1", pin: "n" }, end: { componentId: "r-2", pin: "p" } },
-      { id: "w4", start: { componentId: "r-2", pin: "n" }, end: { componentId: "gnd-1", pin: "g" } }
-    ]
-  },
-  {
-    id: "rc-step-tran",
-    title: "RC Step (.tran)",
-    description: "A first-order RC response to a DC step source.",
-    analysis: cloneAnalysis({ mode: "tran", tStop: "20m", tStep: "0.2m" }),
-    components: [
-      mk({ id: "v-1", type: "V", name: "V1", value: "5", subtype: "DC", x: 200, y: 200 }),
-      mk({ id: "r-1", type: "R", name: "R1", value: "1k", x: 360, y: 160 }),
-      mk({ id: "c-1", type: "C", name: "C1", value: "10u", x: 500, y: 200 }),
-      mk({ id: "gnd-1", type: "GND", name: "GND1", value: "0", x: 200, y: 320 })
-    ],
-    wires: [
-      { id: "w1", start: { componentId: "v-1", pin: "n" }, end: { componentId: "gnd-1", pin: "g" } },
-      { id: "w2", start: { componentId: "v-1", pin: "p" }, end: { componentId: "r-1", pin: "p" } },
-      { id: "w3", start: { componentId: "r-1", pin: "n" }, end: { componentId: "c-1", pin: "p" } },
-      { id: "w4", start: { componentId: "c-1", pin: "n" }, end: { componentId: "gnd-1", pin: "g" } }
-    ]
-  },
-  {
-    id: "diode-clipper-tran",
-    title: "Diode Clipper (.tran)",
-    description: "A sine source through resistor into a diode clamp.",
-    analysis: cloneAnalysis({ mode: "tran", tStop: "5m", tStep: "20u" }),
-    components: [
-      mk({ id: "v-1", type: "V", name: "V1", value: "5", subtype: "SIN", value2: "1000", x: 200, y: 200 }),
-      mk({ id: "r-1", type: "R", name: "R1", value: "1k", x: 360, y: 160 }),
-      mk({ id: "d-1", type: "D", name: "D1", value: "1e-15", x: 500, y: 200 }),
-      mk({ id: "gnd-1", type: "GND", name: "GND1", value: "0", x: 200, y: 320 })
-    ],
-    wires: [
-      { id: "w1", start: { componentId: "v-1", pin: "n" }, end: { componentId: "gnd-1", pin: "g" } },
-      { id: "w2", start: { componentId: "v-1", pin: "p" }, end: { componentId: "r-1", pin: "p" } },
-      { id: "w3", start: { componentId: "r-1", pin: "n" }, end: { componentId: "d-1", pin: "p" } },
-      { id: "w4", start: { componentId: "d-1", pin: "n" }, end: { componentId: "gnd-1", pin: "g" } }
-    ]
+function pinWire(
+  id: string,
+  startCid: string,
+  startPin: string,
+  endCid: string,
+  endPin: string
+): CanvasWire {
+  return {
+    id,
+    start: pinEndpoint(startCid, startPin),
+    end: pinEndpoint(endCid, endPin)
+  };
+}
+
+/** Visible-in-the-Preset-dropdown demo schematics. Cleared per user request. */
+export const SCHEMATIC_PRESETS: SchematicPreset[] = [];
+
+/* ----------------------------------------------------------------------- */
+/* Hidden demos accessible only via the Demo top-menu dropdown.            */
+/* ----------------------------------------------------------------------- */
+
+/** CE amp: AC-coupled output so the waveform plots around 0 V, not 12 V. */
+const ceAmplifier: SchematicPreset = (() => {
+  const components: CanvasComponent[] = [
+    mk({ id: "v-in", type: "V", name: "Vin", value: "0.05", subtype: "SIN", value2: "1k", x: 160, y: 296 }),
+    mk({ id: "c-in", type: "C", name: "Cin", value: "10u", x: 300, y: 260 }),
+    mk({ id: "q-1", type: "QNPN", name: "Q1", value: "40m", value2: "2.5k", x: 460, y: 260 }),
+    mk({ id: "r-c", type: "R", name: "Rc", value: "4.7k", x: 460, y: 140, rotation: 90 }),
+    mk({ id: "r-e", type: "R", name: "Re", value: "470", x: 460, y: 360, rotation: 90 }),
+    mk({ id: "c-out", type: "C", name: "Cout", value: "10u", x: 580, y: 224 }),
+    mk({ id: "r-load", type: "R", name: "Rload", value: "10k", x: 700, y: 260, rotation: 90 }),
+    mk({ id: "gnd-1", type: "GND", name: "GND1", value: "0", x: 160, y: 356 }),
+    mk({ id: "gnd-2", type: "GND", name: "GND2", value: "0", x: 460, y: 420 }),
+    mk({ id: "gnd-3", type: "GND", name: "GND3", value: "0", x: 700, y: 320 }),
+    mk({ id: "gnd-4", type: "GND", name: "GND4", value: "0", x: 460, y: 80 })
+  ];
+  const wires: CanvasWire[] = [
+    pinWire("ce-w1", "v-in", "n", "gnd-1", "g"),
+    pinWire("ce-w2", "v-in", "p", "c-in", "p"),
+    pinWire("ce-w3", "c-in", "n", "q-1", "b"),
+    pinWire("ce-w4", "q-1", "c", "r-c", "n"),
+    pinWire("ce-w5", "r-c", "p", "gnd-4", "g"),
+    pinWire("ce-w7", "q-1", "e", "r-e", "p"),
+    pinWire("ce-w8", "r-e", "n", "gnd-2", "g"),
+    pinWire("ce-w9", "q-1", "c", "c-out", "p"),
+    pinWire("ce-w10", "c-out", "n", "r-load", "p"),
+    pinWire("ce-w11", "r-load", "n", "gnd-3", "g")
+  ];
+  return {
+    id: "ce-amplifier",
+    title: "CE Amplifier",
+    description:
+      "Common-emitter NPN small-signal amplifier with AC-grounded collector load and AC-coupled output.",
+    analysis: cloneAnalysis({ mode: "tran", tStop: "5m", tStep: "5u", probeNodes: [] }),
+    components,
+    wires
+  };
+})();
+
+/* ----------------------------------------------------------------------- */
+/* 3-stage op-amp using the SUBCKT mechanism.                              */
+/*                                                                          */
+/* Top level shows three SUBCKT rectangles (DiffAmp, MidStage, OutStage)   */
+/* wired in cascade. Each sub-level holds the actual gain block tied to    */
+/* ``port_<pin>`` junctions, and the backend's _flatten_subcircuits pass   */
+/* stitches outer SUBCKT pins to those inner ports at simulate time.       */
+/* ----------------------------------------------------------------------- */
+
+const threeStageOpamp: SchematicPreset = (() => {
+  /*
+   * BJT-only three-stage small-signal demo:
+   *
+   * 1. Differential input pair: two QNPNs share a tail resistor, each collector
+   *    has an AC-grounded load, and the right collector is the single-ended out.
+   * 2. Common-emitter voltage gain block: QNPN collector output with Rc to AC
+   *    ground and emitter at small-signal ground.
+   * 3. Follower output buffer: QNPN emitter follower, the BJT equivalent of the
+   *    requested source-follower behavior.
+   *
+   * The backend keeps these as QNPN components through subcircuit flattening,
+   * then stamps each BJT as a hybrid-pi small-signal model during MNA assembly.
+   * Local GND components collapse to global small-signal ground.
+   */
+  function buildDifferentialStage(): SchematicLevel {
+    const prefix = "diff";
+    return {
+      id: "lvl-diff",
+      title: "Differential amp",
+      parentId: "root",
+      pins: ["in_p", "out", "in_n"],
+      junctions: [
+        { id: "port_in_p", x: 80, y: 240 },
+        { id: "port_in_n", x: 80, y: 320 },
+        { id: "port_out", x: 620, y: 180 }
+      ],
+      components: [
+        mk({ id: `${prefix}-q1`, type: "QNPN", name: "Q1", value: "2m", value2: "20k", x: 280, y: 240 }),
+        mk({ id: `${prefix}-q2`, type: "QNPN", name: "Q2", value: "2m", value2: "20k", x: 440, y: 240 }),
+        mk({ id: `${prefix}-rc1`, type: "R", name: "Rc1", value: "6.2k", x: 280, y: 100, rotation: 90 }),
+        mk({ id: `${prefix}-rc2`, type: "R", name: "Rc2", value: "6.2k", x: 440, y: 100, rotation: 90 }),
+        mk({ id: `${prefix}-tail`, type: "R", name: "Rtail", value: "3.3k", x: 360, y: 312, rotation: 90 }),
+        mk({ id: `${prefix}-gnd-c1`, type: "GND", name: "GNDc1", value: "0", x: 280, y: 20 }),
+        mk({ id: `${prefix}-gnd-c2`, type: "GND", name: "GNDc2", value: "0", x: 440, y: 20 }),
+        mk({ id: `${prefix}-gnd-tail`, type: "GND", name: "GNDt", value: "0", x: 360, y: 372 })
+      ],
+      wires: [
+        { id: `${prefix}-w-inp`, start: pinEndpoint(`${prefix}-q1`, "b"), end: pointEndpoint(80, 240) },
+        { id: `${prefix}-w-inn`, start: pinEndpoint(`${prefix}-q2`, "b"), end: pointEndpoint(80, 320) },
+        pinWire(`${prefix}-w-c1`, `${prefix}-q1`, "c", `${prefix}-rc1`, "n"),
+        pinWire(`${prefix}-w-c2`, `${prefix}-q2`, "c", `${prefix}-rc2`, "n"),
+        pinWire(`${prefix}-w-rc1-g`, `${prefix}-rc1`, "p", `${prefix}-gnd-c1`, "g"),
+        pinWire(`${prefix}-w-rc2-g`, `${prefix}-rc2`, "p", `${prefix}-gnd-c2`, "g"),
+        { id: `${prefix}-w-e1`, start: pinEndpoint(`${prefix}-q1`, "e"), end: pointEndpoint(360, 276) },
+        { id: `${prefix}-w-e2`, start: pinEndpoint(`${prefix}-q2`, "e"), end: pointEndpoint(360, 276) },
+        { id: `${prefix}-w-tail`, start: pinEndpoint(`${prefix}-tail`, "p"), end: pointEndpoint(360, 276) },
+        pinWire(`${prefix}-w-tail-g`, `${prefix}-tail`, "n", `${prefix}-gnd-tail`, "g"),
+        { id: `${prefix}-w-out`, start: pinEndpoint(`${prefix}-q2`, "c"), end: pointEndpoint(620, 180) }
+      ]
+    };
   }
-];
+
+  function buildCommonEmitterStage(): SchematicLevel {
+    const prefix = "mid";
+    return {
+      id: "lvl-mid",
+      title: "CE gain stage",
+      parentId: "root",
+      pins: ["in", "out"],
+      junctions: [
+        { id: "port_in", x: 80, y: 240 },
+        { id: "port_out", x: 560, y: 180 }
+      ],
+      components: [
+        mk({ id: `${prefix}-q1`, type: "QNPN", name: "Q1", value: "3m", value2: "12k", x: 300, y: 240 }),
+        mk({ id: `${prefix}-rc`, type: "R", name: "Rc", value: "5.6k", x: 300, y: 100, rotation: 90 }),
+        mk({ id: `${prefix}-gnd-c`, type: "GND", name: "GNDc", value: "0", x: 300, y: 20 }),
+        mk({ id: `${prefix}-gnd-e`, type: "GND", name: "GNDe", value: "0", x: 300, y: 360 })
+      ],
+      wires: [
+        { id: `${prefix}-w-in`, start: pinEndpoint(`${prefix}-q1`, "b"), end: pointEndpoint(80, 240) },
+        pinWire(`${prefix}-w-c`, `${prefix}-q1`, "c", `${prefix}-rc`, "n"),
+        pinWire(`${prefix}-w-rc-g`, `${prefix}-rc`, "p", `${prefix}-gnd-c`, "g"),
+        pinWire(`${prefix}-w-e-g`, `${prefix}-q1`, "e", `${prefix}-gnd-e`, "g"),
+        { id: `${prefix}-w-out`, start: pinEndpoint(`${prefix}-q1`, "c"), end: pointEndpoint(560, 180) }
+      ]
+    };
+  }
+
+  function buildFollowerStage(): SchematicLevel {
+    const prefix = "out";
+    return {
+      id: "lvl-out",
+      title: "Emitter follower",
+      parentId: "root",
+      pins: ["in", "out"],
+      junctions: [
+        { id: "port_in", x: 80, y: 220 },
+        { id: "port_out", x: 560, y: 300 }
+      ],
+      components: [
+        mk({ id: `${prefix}-q1`, type: "QNPN", name: "Q1", value: "8m", value2: "6k", x: 300, y: 220 }),
+        mk({ id: `${prefix}-re`, type: "R", name: "Re", value: "1k", x: 300, y: 400, rotation: 90 }),
+        mk({ id: `${prefix}-gnd-c`, type: "GND", name: "GNDc", value: "0", x: 300, y: 100 }),
+        mk({ id: `${prefix}-gnd-e`, type: "GND", name: "GNDe", value: "0", x: 300, y: 500 })
+      ],
+      wires: [
+        { id: `${prefix}-w-in`, start: pinEndpoint(`${prefix}-q1`, "b"), end: pointEndpoint(80, 220) },
+        pinWire(`${prefix}-w-c-g`, `${prefix}-q1`, "c", `${prefix}-gnd-c`, "g"),
+        pinWire(`${prefix}-w-e`, `${prefix}-q1`, "e", `${prefix}-re`, "p"),
+        pinWire(`${prefix}-w-re-g`, `${prefix}-re`, "n", `${prefix}-gnd-e`, "g"),
+        { id: `${prefix}-w-out`, start: pinEndpoint(`${prefix}-q1`, "e"), end: pointEndpoint(560, 300) }
+      ]
+    };
+  }
+
+  const lvlDiff = buildDifferentialStage();
+  const lvlMid = buildCommonEmitterStage();
+  const lvlOut = buildFollowerStage();
+
+  /* ------------------- Top level: SUBCKT cascade ----------------------- */
+  // SUBCKT pin ordering follows getPinCoordinates. The differential block uses
+  // three pins so in_p sits left, out sits right, and in_n sits on top where the
+  // top level ties it to the local small-signal reference.
+  const topComponents: CanvasComponent[] = [
+    mk({ id: "v-in", type: "V", name: "Vin", value: "0.001", subtype: "SIN", value2: "1k", x: 120, y: 276 }),
+    mk({
+      id: "sub-diff",
+      type: "SUBCKT",
+      name: "DiffAmp",
+      value: "",
+      subcircuitId: "lvl-diff",
+      pins: ["in_p", "out", "in_n"],
+      x: 360,
+      y: 240
+    }),
+    mk({
+      id: "sub-mid",
+      type: "SUBCKT",
+      name: "MidStage",
+      value: "",
+      subcircuitId: "lvl-mid",
+      pins: ["in", "out"],
+      x: 620,
+      y: 240
+    }),
+    mk({
+      id: "sub-out",
+      type: "SUBCKT",
+      name: "OutStage",
+      value: "",
+      subcircuitId: "lvl-out",
+      pins: ["in", "out"],
+      x: 880,
+      y: 240
+    }),
+    mk({ id: "r-load", type: "R", name: "Rload", value: "10k", x: 1080, y: 276, rotation: 90 }),
+    mk({ id: "gnd-in", type: "GND", name: "GNDi", value: "0", x: 120, y: 360 }),
+    mk({ id: "gnd-ref", type: "GND", name: "GNDref", value: "0", x: 360, y: 100 }),
+    mk({ id: "gnd-load", type: "GND", name: "GNDl", value: "0", x: 1080, y: 336 })
+  ];
+
+  // The cascade carries the single-ended output forward. Inter-stage links run
+  // through explicit points so the SUBCKT flattener can stitch both block pins
+  // onto the same top-level net.
+  const topWires: CanvasWire[] = [
+    pinWire("op-w1", "v-in", "n", "gnd-in", "g"),
+    pinWire("op-w2", "v-in", "p", "sub-diff", "in_p"),
+    pinWire("op-w3", "sub-diff", "in_n", "gnd-ref", "g"),
+    { id: "op-w4a", start: pinEndpoint("sub-diff", "out"), end: pointEndpoint(500, 240) },
+    { id: "op-w4b", start: pointEndpoint(500, 240), end: pinEndpoint("sub-mid", "in") },
+    { id: "op-w5a", start: pinEndpoint("sub-mid", "out"), end: pointEndpoint(760, 240) },
+    { id: "op-w5b", start: pointEndpoint(760, 240), end: pinEndpoint("sub-out", "in") },
+    pinWire("op-w6", "sub-out", "out", "r-load", "p"),
+    pinWire("op-w7", "r-load", "n", "gnd-load", "g")
+  ];
+
+  return {
+    id: "three-stage-opamp",
+    title: "3-Stage Op-Amp (SUBCKT)",
+    description:
+      "Top level shows three BJT SUBCKT blocks: a differential pair, common-emitter gain stage, and emitter-follower buffer tuned to about 50 V/V.",
+    analysis: cloneAnalysis({ mode: "tran", tStop: "5m", tStep: "5u", probeNodes: [] }),
+    components: topComponents,
+    wires: topWires,
+    extraLevels: [lvlDiff, lvlMid, lvlOut]
+  };
+})();
+
+export const HIDDEN_DEMO_PRESETS: SchematicPreset[] = [ceAmplifier, threeStageOpamp];

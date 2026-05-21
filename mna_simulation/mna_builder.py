@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 
 from .api.contracts import CircuitIR, ComponentRecord, IndexMap, MnaProblem
@@ -10,9 +12,56 @@ from .errors import error_handler
 from .utils import format_voltage_labels, parse_value
 
 
+def _ground_aliases(components: list[ComponentRecord]) -> set[str]:
+    """Return the set of node names that should be treated as ground.
+
+    Always includes the canonical "0". Any node referenced by a ``GND <node>``
+    component is added to the alias set, so the rest of the MNA pipeline can
+    treat that node as the reference rail.
+    """
+
+    aliases: set[str] = {"0"}
+    for component in components:
+        if component.type == "GND" and component.node1:
+            aliases.add(component.node1)
+    return aliases
+
+
+def _normalize_components(components: list[ComponentRecord]) -> list[ComponentRecord]:
+    """Strip GND symbols and rewrite any ground-aliased nodes to "0".
+
+    The MNA pipeline expects ground references to be the literal string "0".
+    This helper normalizes a netlist that may use other identifiers (declared
+    via ``GND <node>`` lines) so downstream code stays unchanged.
+    """
+
+    aliases = _ground_aliases(components)
+
+    def alias(node: str | None) -> str | None:
+        if node is None:
+            return None
+        return "0" if node in aliases else node
+
+    out: list[ComponentRecord] = []
+    for component in components:
+        if component.type == "GND":
+            continue
+        out.append(
+            replace(
+                component,
+                node1=alias(component.node1),
+                node2=alias(component.node2),
+                ctrl_node1=alias(component.ctrl_node1),
+                ctrl_node2=alias(component.ctrl_node2),
+            )
+        )
+    return out
+
+
 def _build_index_map(components: list[ComponentRecord]) -> IndexMap:
     node_names: set[str] = set()
     extra_current_components: list[ComponentRecord] = []
+    seen_branch_names: set[str] = set()
 
     for component in components:
         if component.node1:
@@ -25,6 +74,12 @@ def _build_index_map(components: list[ComponentRecord]) -> IndexMap:
             node_names.add(component.ctrl_node2)
 
         if component.type in {"V", "VCVS", "CCVS", "L"}:
+            if component.name in seen_branch_names:
+                error_handler(
+                    f"NETLIST_FATAL: Duplicate component name '{component.name}'. "
+                    f"Use unique names or rename via '<name>:<TYPE>'."
+                )
+            seen_branch_names.add(component.name)
             extra_current_components.append(component)
 
     node_names.discard("0")
@@ -44,7 +99,11 @@ def _build_index_map(components: list[ComponentRecord]) -> IndexMap:
 def build_mna_problem(circuit: CircuitIR, gmin: float = 0.0) -> MnaProblem:
     """Construct the MNA matrices and symbolic source/nonlinear vectors."""
 
-    index_map = _build_index_map(circuit.components)
+    # Pre-process components: drop GND symbols (used only to flag ground nodes)
+    # and rewrite their referenced node names to the canonical ground "0".
+    components = _normalize_components(circuit.components)
+
+    index_map = _build_index_map(components)
     num_nodes = len(index_map.node_names)
     num_branches = len(index_map.branch_names)
     size = num_nodes + num_branches
@@ -98,7 +157,7 @@ def build_mna_problem(circuit: CircuitIR, gmin: float = 0.0) -> MnaProblem:
             G[k, kv] -= 1
             G[kv, k] -= 1
 
-    for component in circuit.components:
+    for component in components:
         comp_type = component.type
         j = get_index(component.node1)
         k = get_index(component.node2)
@@ -200,6 +259,22 @@ def build_mna_problem(circuit: CircuitIR, gmin: float = 0.0) -> MnaProblem:
                 f_str[k, 0] = term if f_str[k, 0] == "0" else f"{f_str[k, 0]} - ({diode_expr})"
             if gmin > 0.0:
                 stamp(G, j, k, gmin)
+        elif comp_type in {"QNPN", "QPNP"}:
+            base = get_index(component.ctrl_node1)
+            emitter = k
+            collector = j
+            gm = parse_value(component.value or "40m")
+            r_pi = parse_value(component.value2 or "2.5k")
+            stamp(G, base, emitter, 1.0 / r_pi)
+            # Hybrid-pi transconductance: gm * Vbe flowing collector -> emitter.
+            if collector != -1 and base != -1:
+                G[collector, base] += gm
+            if collector != -1 and emitter != -1:
+                G[collector, emitter] -= gm
+            if emitter != -1 and base != -1:
+                G[emitter, base] -= gm
+            if emitter != -1:
+                G[emitter, emitter] += gm
         elif comp_type == "B":
             expression = component.value or "0"
             if j != -1:
@@ -226,7 +301,7 @@ def build_mna_problem(circuit: CircuitIR, gmin: float = 0.0) -> MnaProblem:
         b_ac=b_ac,
         b_time_str=b_time_str,
         index_map=index_map,
-        components=circuit.components,
+        components=components,
         gmin=gmin,
         metadata=metadata,
     )

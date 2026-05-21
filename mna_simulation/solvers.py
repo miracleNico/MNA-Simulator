@@ -14,7 +14,13 @@ from .errors import error_handler
 
 
 def lu_decomposition(matrix: np.ndarray) -> tuple[np.ndarray | None, np.ndarray | None]:
-    """Doolittle LU decomposition without pivoting."""
+    """Doolittle LU decomposition without pivoting.
+
+    Kept for callers that explicitly want the (L, U) pair. For solving linear
+    systems, prefer :func:`solve_linear`, which uses LAPACK with partial
+    pivoting — pivoting is essential for MNA matrices whose diagonals can be
+    zero (e.g. nodes with only V-sources and capacitors at DC).
+    """
 
     n = matrix.shape[0]
     L = np.zeros((n, n))
@@ -33,6 +39,20 @@ def lu_decomposition(matrix: np.ndarray) -> tuple[np.ndarray | None, np.ndarray 
             L[i, k] = (matrix[i, k] - np.dot(L[i, :k], U[:k, k])) / U[k, k]
 
     return L, U
+
+
+def solve_linear(A: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Solve ``A x = b`` with partial pivoting (LAPACK ``gesv``).
+
+    MNA matrices routinely have zero diagonal entries — any node touching only
+    voltage sources and capacitors will have ``G[node, node] == 0`` at DC, and
+    a fixed-pivot LU breaks immediately on it. This helper delegates to
+    :func:`numpy.linalg.solve`, which performs partial pivoting internally,
+    and re-raises a clear ``LinAlgError`` when the system is genuinely
+    singular.
+    """
+
+    return np.linalg.solve(A, b)
 
 
 def forward_substitution(L: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -112,10 +132,11 @@ def solve_dc_nr(
 
     size = G.shape[0]
     if not is_nonlinear(f_str_vector):
-        L, U = lu_decomposition(G)
-        if L is None or U is None:
-            error_handler("NR_CONVERGENCE: Linear system is singular (G matrix).")
-        return backward_substitution(U, forward_substitution(L, b))
+        try:
+            return solve_linear(G, b)
+        except np.linalg.LinAlgError as exc:
+            error_handler(f"NR_CONVERGENCE: Linear system is singular (G matrix): {exc}")
+            raise
 
     f_func, Jf_func = compile_nl_functions(f_str_vector, size)
     if isinstance(init_cond, str):

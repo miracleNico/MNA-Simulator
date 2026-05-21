@@ -205,6 +205,129 @@ function drawControlledSource(
   ctx.restore();
 }
 
+function drawBJT(
+  ctx: CanvasRenderingContext2D,
+  theme: SymbolTheme,
+  polarity: "npn" | "pnp"
+): void {
+  const w = COMPONENT_BOX;
+  // pins: collector(0,-w/2), base(-w/2,0), emitter(0,w/2)
+  ctx.save();
+  ctx.strokeStyle = theme.stroke;
+  ctx.lineWidth = 1.8;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  // Base lead
+  ctx.beginPath();
+  ctx.moveTo(-w / 2, 0);
+  ctx.lineTo(-12, 0);
+  ctx.stroke();
+  // Vertical "bar" (base region)
+  ctx.beginPath();
+  ctx.moveTo(-12, -16);
+  ctx.lineTo(-12, 16);
+  ctx.stroke();
+  // Collector & emitter slants from bar to body pins
+  ctx.beginPath();
+  ctx.moveTo(-12, -8);
+  ctx.lineTo(8, -16);
+  ctx.lineTo(8, -w / 2);
+  ctx.moveTo(8, -w / 2);
+  ctx.lineTo(0, -w / 2);
+  // emitter slant
+  ctx.moveTo(-12, 8);
+  ctx.lineTo(8, 16);
+  ctx.lineTo(8, w / 2);
+  ctx.moveTo(8, w / 2);
+  ctx.lineTo(0, w / 2);
+  ctx.stroke();
+  // Arrow on emitter (NPN: out from bar; PNP: into bar)
+  ctx.fillStyle = theme.accent;
+  ctx.strokeStyle = theme.accent;
+  ctx.beginPath();
+  if (polarity === "npn") {
+    // arrow pointing toward emitter pin (down-right)
+    const ax = 4;
+    const ay = 12;
+    ctx.moveTo(ax, ay);
+    ctx.lineTo(ax - 6, ay - 1);
+    ctx.lineTo(ax - 1, ay + 5);
+    ctx.closePath();
+  } else {
+    // arrow pointing into base bar (up-left), drawn near upper slant
+    const ax = -8;
+    const ay = -8;
+    ctx.moveTo(ax, ay);
+    ctx.lineTo(ax + 6, ay - 1);
+    ctx.lineTo(ax + 1, ay + 5);
+    ctx.closePath();
+  }
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawMOSFET(
+  ctx: CanvasRenderingContext2D,
+  theme: SymbolTheme,
+  polarity: "n" | "p"
+): void {
+  const w = COMPONENT_BOX;
+  // pins: drain(0,-w/2), gate(-w/2,0), source(0,w/2) for n; flipped for p
+  ctx.save();
+  ctx.strokeStyle = theme.stroke;
+  ctx.lineWidth = 1.8;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  // Gate lead
+  ctx.beginPath();
+  ctx.moveTo(-w / 2, 0);
+  ctx.lineTo(-14, 0);
+  ctx.stroke();
+  // Gate vertical line
+  ctx.beginPath();
+  ctx.moveTo(-14, -14);
+  ctx.lineTo(-14, 14);
+  ctx.stroke();
+  // Channel (the "T" shape on right side)
+  ctx.beginPath();
+  ctx.moveTo(-8, -14);
+  ctx.lineTo(-8, -6);
+  ctx.moveTo(-8, -2);
+  ctx.lineTo(-8, 2);
+  ctx.moveTo(-8, 6);
+  ctx.lineTo(-8, 14);
+  ctx.stroke();
+  // Drain & Source leads
+  ctx.beginPath();
+  ctx.moveTo(-8, -14);
+  ctx.lineTo(8, -14);
+  ctx.lineTo(8, -w / 2);
+  ctx.moveTo(8, -w / 2);
+  ctx.lineTo(0, -w / 2);
+  ctx.moveTo(-8, 14);
+  ctx.lineTo(8, 14);
+  ctx.lineTo(8, w / 2);
+  ctx.moveTo(8, w / 2);
+  ctx.lineTo(0, w / 2);
+  ctx.stroke();
+  // Arrow indicating polarity (NMOS arrow points toward channel; PMOS away)
+  ctx.fillStyle = theme.accent;
+  ctx.strokeStyle = theme.accent;
+  ctx.beginPath();
+  if (polarity === "n") {
+    ctx.moveTo(-2, 0);
+    ctx.lineTo(-8, -3);
+    ctx.lineTo(-8, 3);
+  } else {
+    ctx.moveTo(-8, 0);
+    ctx.lineTo(-2, -3);
+    ctx.lineTo(-2, 3);
+  }
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
 function drawSubckt(ctx: CanvasRenderingContext2D, theme: SymbolTheme, component: CanvasComponent): void {
   ctx.save();
   ctx.strokeStyle = theme.stroke;
@@ -277,6 +400,18 @@ export function drawComponent(
       break;
     case "SUBCKT":
       drawSubckt(ctx, theme, component);
+      break;
+    case "QNPN":
+      drawBJT(ctx, theme, "npn");
+      break;
+    case "QPNP":
+      drawBJT(ctx, theme, "pnp");
+      break;
+    case "NMOS":
+      drawMOSFET(ctx, theme, "n");
+      break;
+    case "PMOS":
+      drawMOSFET(ctx, theme, "p");
       break;
   }
   ctx.restore();

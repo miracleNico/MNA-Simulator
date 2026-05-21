@@ -32,29 +32,62 @@ class Component:
     type: str | None = None
     metadata: dict[str, str] = field(default_factory=dict)
 
-    TYPE = r"(R|C|V|L|I|VCCS|VCVS|CCCS|CCVS|E|F|G|H|D|B)"
+    # Recognized type prefixes.
+    # Order matters for `get_type` — list multi-letter prefixes (VCVS, etc.) before
+    # their single-letter aliases so we don't classify "VCVS1" as a "V" source.
+    TYPE = r"(QNPN|QPNP|VCVS|VCCS|CCVS|CCCS|GND|R|C|V|L|I|E|F|G|H|D|B|Q|M)"
     NUMBER = r"[+-]?(\d+(\.\d*)?|\.\d+)"
     SCIENTIFIC_NOTATION = r"([eE][+-]?\d+)"
     METRIC_SUFFIXES = r"(u|U|m|M|k|K|Meg|MEG|G|N|P|F|%)"
-    COMPONENT_PATTERN = re.compile(rf"^({TYPE}\d+)$", re.IGNORECASE)
+    # Names: any alphanumeric identifier. Optionally suffixed with ":TYPE" to
+    # decouple the component name from its type prefix entirely.
+    #   R1                — name=R1,   type=R (prefix-inferred)
+    #   Rload             — name=Rload type=R (prefix-inferred)
+    #   feedback:R        — name=feedback type=R (explicit)
+    #   load_resistor:R   — name=load_resistor type=R (explicit)
+    NAME_BARE = r"[A-Za-z][A-Za-z0-9_]*"
+    NAME_EXPLICIT_TYPE = rf"({NAME_BARE}):({TYPE})"
+    COMPONENT_PATTERN = re.compile(rf"^({NAME_BARE}|{NAME_EXPLICIT_TYPE})$", re.IGNORECASE)
+    EXPLICIT_TYPE_PATTERN = re.compile(rf"^{NAME_EXPLICIT_TYPE}$", re.IGNORECASE)
     INDEPENDENT_VAL_PATTERN = re.compile(f"^{NUMBER}({SCIENTIFIC_NOTATION}|{METRIC_SUFFIXES})?$")
     DEPENDENT_VAL_PATTERN = re.compile(f"^{NUMBER}({SCIENTIFIC_NOTATION}|{METRIC_SUFFIXES})?$")
-    NODE_PATTERN = re.compile(r"^(0|n\d+)$", re.IGNORECASE)
+    # Node name: anything that's a plain identifier or "0" (ground).
+    NODE_PATTERN = re.compile(r"^[A-Za-z0-9_]+$")
     DUTY_CYCLE = re.compile(r"^(\d+(\.\d*)?|\.\d+)(%)?$")
 
     @classmethod
     def from_parts(cls, parts: list[str]) -> "Component":
-        """Create and validate a component from netlist tokens."""
+        """Create and validate a component from netlist tokens.
+
+        Supports two name forms:
+          1. ``R1`` / ``Rload`` — type inferred from leading letter prefix.
+          2. ``feedback:R`` — name and type explicitly decoupled.
+
+        Both produce a ``Component`` with the requested ``type``. The remaining
+        tokens are parsed exactly as before for that type.
+        """
 
         if not parts:
             error_handler("NETLIST_FATAL: Empty component definition.")
 
-        name = parts[0]
-        if not cls.COMPONENT_PATTERN.match(name):
-            error_handler(f"COMPONENT_ERROR: Invalid component name: '{name}'")
+        name_token = parts[0]
+        explicit = cls.EXPLICIT_TYPE_PATTERN.match(name_token)
+        if explicit is not None:
+            name = explicit.group(1)
+            type_ = explicit.group(2).upper()
+        else:
+            if not cls.COMPONENT_PATTERN.match(name_token):
+                error_handler(f"COMPONENT_ERROR: Invalid component name: '{name_token}'")
+            name = name_token
+            type_ = cls.get_type(name)
+            if type_ is None:
+                error_handler(
+                    f"COMPONENT_ERROR: Cannot infer type from '{name_token}'. "
+                    f"Use '<name>:<TYPE>' to declare the type explicitly."
+                )
 
         component = cls(name=name)
-        component.type = component.get_type(name)
+        component.type = type_
 
         if component.type in {"R", "C", "L"}:
             cls._parse_passive(component, parts)
@@ -64,17 +97,26 @@ class Component:
             cls._parse_dependent(component, parts)
         elif component.type == "D":
             cls._parse_diode(component, parts)
+        elif component.type in {"QNPN", "QPNP"}:
+            cls._parse_bjt(component, parts)
         elif component.type == "B":
             cls._parse_behavioral(component, parts)
+        elif component.type == "GND":
+            cls._parse_ground(component, parts)
         else:
-            error_handler("NETLIST_FATAL: Unknown component or name format")
+            error_handler(f"NETLIST_FATAL: Unsupported component type '{component.type}'.")
 
         component.validate()
         return component
 
     @staticmethod
     def get_type(name: str) -> str | None:
-        """Infer the normalized type from the device name prefix."""
+        """Infer the normalized type from the device name prefix.
+
+        Multi-letter prefixes (VCVS, VCCS, CCVS, CCCS, GND) are checked first
+        so that names like ``GND1`` resolve to type ``GND`` rather than the
+        single-letter alias ``G`` (VCCS).
+        """
 
         upper_name = name.upper()
         for prefix, normalized in (
@@ -82,6 +124,7 @@ class Component:
             ("VCCS", "VCCS"),
             ("CCVS", "CCVS"),
             ("CCCS", "CCCS"),
+            ("GND", "GND"),
             ("R", "R"),
             ("C", "C"),
             ("L", "L"),
@@ -93,6 +136,7 @@ class Component:
             ("H", "CCVS"),
             ("D", "D"),
             ("B", "B"),
+            ("Q", "QNPN"),
         ):
             if upper_name.startswith(prefix):
                 return normalized
@@ -146,23 +190,40 @@ class Component:
 
     @classmethod
     def _parse_dependent(cls, component: "Component", parts: list[str]) -> None:
-        expected = 6 if component.type in {"VCVS", "VCCS"} else 5
-        if len(parts) != expected:
-            error_handler(f"COMPONENT_ERROR: '{component.name}' expected {expected} parts, got {len(parts)}")
-        component.node1 = parts[1]
-        component.node2 = parts[2]
+        # Accept both bare and SPICE-style forms:
+        #   E1 n+ n- c+ c- gain               (6 tokens)
+        #   E1 n+ n- VCVS c+ c- gain          (7 tokens, with explicit type)
+        #   F1 n+ n- ctrl gain                (5 tokens)
+        #   F1 n+ n- CCCS ctrl gain           (6 tokens, with explicit type)
+        type_token = component.type or ""
+        body = parts[1:]
+        if body and body[2:3] and body[2].upper() == type_token:
+            body = body[:2] + body[3:]
+
+        if component.type in {"VCVS", "VCCS"}:
+            expected = 5
+        else:
+            expected = 4
+        if len(body) != expected:
+            error_handler(
+                f"COMPONENT_ERROR: '{component.name}' expected {expected + 1} or "
+                f"{expected + 2} parts, got {len(parts)}"
+            )
+
+        component.node1 = body[0]
+        component.node2 = body[1]
         cls._validate_distinct_nodes(component)
         if component.type in {"VCVS", "VCCS"}:
-            component.ctrl_node1 = parts[3]
-            component.ctrl_node2 = parts[4]
-            component.value = parts[5]
+            component.ctrl_node1 = body[2]
+            component.ctrl_node2 = body[3]
+            component.value = body[4]
             if component.ctrl_node1 == component.ctrl_node2:
                 error_handler(
                     f"COMPONENT_ERROR: '{component.name}' control nodes must be different."
                 )
         else:
-            component.ctrl_source = parts[3]
-            component.value = parts[4]
+            component.ctrl_source = body[2]
+            component.value = body[3]
 
     @classmethod
     def _parse_diode(cls, component: "Component", parts: list[str]) -> None:
@@ -174,6 +235,31 @@ class Component:
         cls._validate_distinct_nodes(component)
 
     @classmethod
+    def _parse_bjt(cls, component: "Component", parts: list[str]) -> None:
+        # Small-signal hybrid-pi BJT:
+        #   Q1 collector base emitter QNPN gm rpi
+        #   Q1 collector base emitter gm rpi       (defaults to QNPN)
+        if len(parts) not in {6, 7}:
+            error_handler(f"COMPONENT_ERROR: '{component.name}' expected 6 or 7 parts, got {len(parts)}")
+        component.node1 = parts[1]
+        component.ctrl_node1 = parts[2]
+        component.node2 = parts[3]
+        if component.node1 == component.node2:
+            error_handler(f"COMPONENT_ERROR: '{component.name}' collector and emitter must be different.")
+        if len(parts) == 7:
+            bjt_type = parts[4].upper()
+            if bjt_type not in {"QNPN", "QPNP"}:
+                error_handler(f"COMPONENT_ERROR: '{component.name}' has invalid BJT type '{parts[4]}'.")
+            component.type = bjt_type
+            component.subtype = bjt_type
+            component.value = parts[5]
+            component.value2 = parts[6]
+        else:
+            component.subtype = component.type or "QNPN"
+            component.value = parts[4]
+            component.value2 = parts[5]
+
+    @classmethod
     def _parse_behavioral(cls, component: "Component", parts: list[str]) -> None:
         if len(parts) != 4:
             error_handler(f"COMPONENT_ERROR: '{component.name}' expected 4 parts, got {len(parts)}")
@@ -181,6 +267,23 @@ class Component:
         component.node2 = parts[2]
         component.value = parts[3]
         cls._validate_distinct_nodes(component)
+
+    @classmethod
+    def _parse_ground(cls, component: "Component", parts: list[str]) -> None:
+        """``GND <node>`` — declares ``<node>`` to be the ground reference (alias of '0').
+
+        ``GND<name> <node>`` is also accepted to allow multiple ground stamps.
+        ``GND 0`` is allowed and is a no-op.
+        """
+
+        if len(parts) != 2:
+            error_handler(
+                f"COMPONENT_ERROR: '{component.name}' GND statement expects '<node>' "
+                f"(got {len(parts) - 1} arg(s))."
+            )
+        component.node1 = parts[1]
+        component.node2 = "0"
+        component.value = "0"
 
     @staticmethod
     def _validate_distinct_nodes(component: "Component") -> None:
@@ -195,6 +298,13 @@ class Component:
         if self.type is None:
             error_handler(f"NETLIST_FATAL: '{self.name}' has unknown component type.")
 
+        if self.type == "GND":
+            if self.node1 is None or not self.NODE_PATTERN.match(self.node1):
+                error_handler(
+                    f"NETLIST_FATAL: '{self.name}' has invalid GND node name '{self.node1}'."
+                )
+            return True
+
         nodes_to_check = [self.node1, self.node2]
         if self.ctrl_node1 is not None:
             nodes_to_check.append(self.ctrl_node1)
@@ -204,7 +314,8 @@ class Component:
         for node in nodes_to_check:
             if node is None or not self.NODE_PATTERN.match(node):
                 error_handler(
-                    f"NETLIST_FATAL: '{self.name}' has invalid node name '{node}'. Must be '0' or 'n#'."
+                    f"NETLIST_FATAL: '{self.name}' has invalid node name '{node}'. "
+                    f"Use '0' for ground, or any alphanumeric identifier."
                 )
 
         if self.type in {"V", "I"}:
@@ -224,6 +335,13 @@ class Component:
         if self.type in {"R", "C", "L", "D"}:
             if not self.INDEPENDENT_VAL_PATTERN.match(self.value or ""):
                 error_handler(f"NETLIST_FATAL: '{self.name}' has invalid value format '{self.value}'.")
+            return True
+
+        if self.type in {"QNPN", "QPNP"}:
+            if not self.DEPENDENT_VAL_PATTERN.match(self.value or ""):
+                error_handler(f"NETLIST_FATAL: '{self.name}' has invalid gm value '{self.value}'.")
+            if not self.INDEPENDENT_VAL_PATTERN.match(self.value2 or ""):
+                error_handler(f"NETLIST_FATAL: '{self.name}' has invalid rpi value '{self.value2}'.")
             return True
 
         if self.type in {"VCVS", "VCCS", "CCVS", "CCCS"}:
@@ -273,6 +391,11 @@ class Netlist:
 
     def add_component(self, component: Component) -> None:
         self.components.append(component)
+        if component.type == "GND":
+            # GND lines participate in node-name discovery but don't drive
+            # source-conflict checks.
+            self.other_nodes.append(component.node1 or "0")
+            return
         if component.type in {"V", "CCVS", "VCVS"}:
             self.voltage_source_node_sets.append(frozenset([component.node1 or "0", component.node2 or "0"]))
             if component.ctrl_node1:
@@ -285,16 +408,38 @@ class Netlist:
             self.other_nodes.extend([component.node1 or "0", component.node2 or "0"])
 
     def validate(self) -> bool:
-        """Validate netlist-wide topological constraints."""
+        """Validate netlist-wide topological constraints.
 
-        if self.voltage_source_node_sets and len(self.voltage_source_node_sets) > len(set(self.voltage_source_node_sets)):
+        Ground aliases declared via ``GND <node>`` lines are normalized to "0"
+        before topological checks so parallel/series source conflicts that span
+        renamed ground rails are still detected.
+        """
+
+        ground_aliases: set[str] = {"0"}
+        for component in self.components:
+            if component.type == "GND" and component.node1:
+                ground_aliases.add(component.node1)
+
+        def alias(node: str) -> str:
+            return "0" if node in ground_aliases else node
+
+        normalized_v_sets = [
+            frozenset(alias(n) for n in s) for s in self.voltage_source_node_sets
+        ]
+        for s in normalized_v_sets:
+            if len(s) == 1 and "0" in s:
+                error_handler(
+                    "NETLIST_FATAL: Voltage source has both terminals on ground."
+                )
+        if normalized_v_sets and len(normalized_v_sets) > len(set(normalized_v_sets)):
             error_handler("NETLIST_FATAL: Voltage source parallel conflict: Two or more voltage sources are in parallel.")
 
-        if self.current_source_nodes:
-            counts = collections.Counter(self.current_source_nodes)
+        normalized_current_nodes = [alias(n) for n in self.current_source_nodes]
+        normalized_other_nodes = {alias(n) for n in self.other_nodes}
+        if normalized_current_nodes:
+            counts = collections.Counter(normalized_current_nodes)
             junction_nodes = {node for node, count in counts.items() if count > 1}
-            other_nodes_set = set(self.other_nodes)
-            conflict_nodes = junction_nodes - junction_nodes.intersection(other_nodes_set)
+            conflict_nodes = junction_nodes - junction_nodes.intersection(normalized_other_nodes)
             if conflict_nodes:
                 error_handler(
                     f"NETLIST_FATAL: Current source series conflict: Node(s) {conflict_nodes} are the only junctions for series current sources."

@@ -15,12 +15,14 @@ export type PlotTileProps = {
   data?: PlotData;
   /** Subscribe callback invoked when the component mounts; the handler receives a pushFrame fn. */
   onMount?: (push: (t: number, values: number[], labels: string[]) => void, finalize: () => void) => void;
+  /** Rolling display window in sim-seconds (dyn tiles only). Falls back to a 2 s default. */
+  windowSeconds?: number;
   onMove: (id: string, x: number, y: number) => void;
   onResize: (id: string, w: number, h: number) => void;
   onClose: (id: string) => void;
 };
 
-const DYN_WINDOW_SECONDS = 2.0; // rolling window for live scope
+const DEFAULT_DYN_WINDOW_SECONDS = 2.0;
 
 export function PlotTile(props: PlotTileProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -31,6 +33,27 @@ export function PlotTile(props: PlotTileProps) {
     labels: []
   });
   const [, setTick] = useState(0);
+
+  // Keep the latest window size in a ref so frames pushed after a prop change
+  // immediately see the new trim threshold without re-installing onMount.
+  const windowRef = useRef<number>(
+    props.windowSeconds && props.windowSeconds > 0 ? props.windowSeconds : DEFAULT_DYN_WINDOW_SECONDS
+  );
+  useEffect(() => {
+    windowRef.current =
+      props.windowSeconds && props.windowSeconds > 0 ? props.windowSeconds : DEFAULT_DYN_WINDOW_SECONDS;
+    // Immediately trim the buffer to the new window so the user sees the
+    // effect on the next render even before another frame arrives.
+    const buf = dynBuffersRef.current;
+    const maxT = buf.t[buf.t.length - 1];
+    if (maxT !== undefined) {
+      while (buf.t.length > 0 && maxT - buf.t[0] > windowRef.current) {
+        buf.t.shift();
+        buf.values.forEach((arr) => arr.shift());
+      }
+      setTick((x) => x + 1);
+    }
+  }, [props.windowSeconds]);
 
   useEffect(() => {
     if (props.mode === "dyn" && props.onMount) {
@@ -45,9 +68,10 @@ export function PlotTile(props: PlotTileProps) {
           if (!buf.values[i]) buf.values[i] = [];
           buf.values[i].push(v);
         });
-        // Trim
+        // Trim using the latest window size.
+        const win = windowRef.current;
         const maxT = buf.t[buf.t.length - 1];
-        while (buf.t.length > 0 && maxT - buf.t[0] > DYN_WINDOW_SECONDS) {
+        while (buf.t.length > 0 && maxT - buf.t[0] > win) {
           buf.t.shift();
           buf.values.forEach((arr) => arr.shift());
         }

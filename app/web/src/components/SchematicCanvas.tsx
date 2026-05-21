@@ -4,11 +4,16 @@ import {
   CanvasWire,
   DeviceType,
   GRID,
-  PinReference,
+  LevelJunction,
+  WireEndpoint,
   componentBounds,
+  computeNetAssignments,
   createDefaultComponent,
+  endpointXY,
   getPinCoordinates,
   getPinsForType,
+  pinEndpoint,
+  pointEndpoint,
   snap,
   wireKey
 } from "../lib/schematic";
@@ -16,19 +21,29 @@ import { DEFAULT_THEME, drawComponent } from "../lib/symbols";
 
 export type ProbeTarget = { componentId: string; pin: string; netLabel?: string; x: number; y: number };
 
+/** Snapshot for clipboard. */
+export type ClipboardData = {
+  components: CanvasComponent[];
+  wires: CanvasWire[];
+};
+
 type Props = {
   components: CanvasComponent[];
   wires: CanvasWire[];
-  selectedId: string | null;
+  /** Named junctions for the active level (e.g. port_in, port_out for SUBCKT use). */
+  junctions?: LevelJunction[];
+  selectedIds: Set<string>;
   /** When non-null the canvas is in drop mode and will place this device type on click. */
   pendingDevice: DeviceType | null;
   /** True to capture a pin click as a dyn-probe target instead of wiring. */
   probeMode: boolean;
   onSetComponents: (updater: (current: CanvasComponent[]) => CanvasComponent[]) => void;
   onSetWires: (updater: (current: CanvasWire[]) => CanvasWire[]) => void;
-  onSelect: (id: string | null) => void;
+  onSelect: (ids: Set<string>) => void;
   onPendingResolved: () => void;
   onProbePick: (target: ProbeTarget) => void;
+  onCopy: (data: ClipboardData) => void;
+  onPaste: () => void;
 };
 
 type PanState = { x: number; y: number; scale: number };
@@ -36,16 +51,25 @@ type PanState = { x: number; y: number; scale: number };
 type InteractionState =
   | { kind: "idle" }
   | { kind: "panning"; startX: number; startY: number; origin: PanState }
-  | { kind: "moving"; id: string; offsetX: number; offsetY: number }
-  | { kind: "wiring"; from: PinReference; cursorX: number; cursorY: number };
+  | {
+      kind: "moving";
+      ids: string[];
+      anchorWX: number;
+      anchorWY: number;
+      origin: Map<string, { x: number; y: number }>;
+    }
+  | { kind: "wiring"; from: WireEndpoint; cursorX: number; cursorY: number }
+  | { kind: "marquee"; startWX: number; startWY: number; cursorWX: number; cursorWY: number };
 
 const PIN_RADIUS = 5;
+const FREE_HIT = 9;
 
 export function SchematicCanvas(props: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [pan, setPan] = useState<PanState>({ x: 40, y: 40, scale: 1 });
   const [interaction, setInteraction] = useState<InteractionState>({ kind: "idle" });
-  const [hoverPin, setHoverPin] = useState<PinReference | null>(null);
+  const [hoverPin, setHoverPin] = useState<{ componentId: string; pin: string } | null>(null);
+  const [hoverFreePoint, setHoverFreePoint] = useState<{ wireId: string; end: "start" | "end"; x: number; y: number } | null>(null);
   const [mousePos, setMousePos] = useState<{ x: number; y: number; wx: number; wy: number } | null>(null);
 
   const componentsById = useMemo(() => {
@@ -54,11 +78,10 @@ export function SchematicCanvas(props: Props) {
     return map;
   }, [props.components]);
 
-  // Nameable nets aren't computed client-side — we just show pin refs.
-  const netLabelFor = (ref: PinReference): string | undefined => {
-    const c = componentsById.get(ref.componentId);
+  const netLabelFor = (cid: string, pin: string): string | undefined => {
+    const c = componentsById.get(cid);
     if (!c) return undefined;
-    return `${c.name}.${ref.pin}`;
+    return `${c.name}.${pin}`;
   };
 
   // High-DPI canvas sizing.
@@ -75,7 +98,18 @@ export function SchematicCanvas(props: Props) {
   useEffect(() => {
     draw();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.components, props.wires, pan, hoverPin, interaction, mousePos, props.selectedId, props.pendingDevice, props.probeMode]);
+  }, [
+    props.components,
+    props.wires,
+    pan,
+    hoverPin,
+    hoverFreePoint,
+    interaction,
+    mousePos,
+    props.selectedIds,
+    props.pendingDevice,
+    props.probeMode
+  ]);
 
   function clientToWorld(clientX: number, clientY: number) {
     const canvas = canvasRef.current!;
@@ -90,8 +124,8 @@ export function SchematicCanvas(props: Props) {
     };
   }
 
-  function findPinAt(wx: number, wy: number): PinReference | null {
-    let best: { ref: PinReference; d: number } | null = null;
+  function findPinAt(wx: number, wy: number): { componentId: string; pin: string } | null {
+    let best: { ref: { componentId: string; pin: string }; d: number } | null = null;
     for (const c of props.components) {
       const pins = getPinsForType(c.type, c);
       for (const pin of pins) {
@@ -105,6 +139,19 @@ export function SchematicCanvas(props: Props) {
     return best?.ref ?? null;
   }
 
+  /** Find a free-floating wire endpoint near (wx,wy). */
+  function findFreeEndpointAt(wx: number, wy: number) {
+    for (const w of props.wires) {
+      for (const which of ["start", "end"] as const) {
+        const ep = which === "start" ? w.start : w.end;
+        if (ep.kind !== "point") continue;
+        const d = Math.hypot(ep.x - wx, ep.y - wy);
+        if (d < FREE_HIT) return { wireId: w.id, end: which, x: ep.x, y: ep.y };
+      }
+    }
+    return null;
+  }
+
   function findComponentAt(wx: number, wy: number): CanvasComponent | null {
     for (let i = props.components.length - 1; i >= 0; i--) {
       const c = props.components[i];
@@ -114,8 +161,41 @@ export function SchematicCanvas(props: Props) {
     return null;
   }
 
+  /** Locate a wire whose body the cursor lies on (orthogonal segments). */
+  function findWireAt(wx: number, wy: number): CanvasWire | null {
+    for (const w of props.wires) {
+      const a = endpointXY(w.start, componentsById);
+      const b = endpointXY(w.end, componentsById);
+      if (!a || !b) continue;
+      if (
+        pointNearSegment(wx, wy, a.x, a.y, b.x, a.y, 4) ||
+        pointNearSegment(wx, wy, b.x, a.y, b.x, b.y, 4)
+      ) {
+        return w;
+      }
+    }
+    return null;
+  }
+
+  function setSelection(ids: string[]): void {
+    props.onSelect(new Set(ids));
+  }
+
+  function toggleSelection(id: string, additive: boolean): void {
+    const next = new Set(props.selectedIds);
+    if (additive) {
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+    } else {
+      next.clear();
+      next.add(id);
+    }
+    props.onSelect(next);
+  }
+
   function onMouseDown(e: React.MouseEvent<HTMLCanvasElement>) {
     const { wx, wy } = clientToWorld(e.clientX, e.clientY);
+    canvasRef.current?.focus();
     if (props.pendingDevice) {
       const nextIndex =
         props.components.filter((c) => c.type === props.pendingDevice).length + 1;
@@ -125,15 +205,41 @@ export function SchematicCanvas(props: Props) {
       return;
     }
     if (e.button === 1 || e.shiftKey) {
-      setInteraction({
-        kind: "panning",
-        startX: e.clientX,
-        startY: e.clientY,
-        origin: { ...pan }
-      });
+      // Shift held: marquee-select unless the user is on something interactive.
+      // Middle-click pans regardless.
+      if (e.button === 1) {
+        setInteraction({
+          kind: "panning",
+          startX: e.clientX,
+          startY: e.clientY,
+          origin: { ...pan }
+        });
+        return;
+      }
+      // shiftKey: fall through to selection logic, with additive flag.
+    }
+
+    // 1) Wiring: handling the SECOND click that completes/extends a wire.
+    if (interaction.kind === "wiring") {
+      const target = findPinAt(wx, wy);
+      if (target) {
+        finalizeWire(interaction.from, pinEndpoint(target.componentId, target.pin));
+      } else {
+        const free = findFreeEndpointAt(wx, wy);
+        if (free) {
+          finalizeWire(interaction.from, pointEndpoint(free.x, free.y));
+        } else {
+          // Settle a free endpoint at the click coordinate. Wiring ends here —
+          // click the free endpoint later to resume from that point.
+          const settle = pointEndpoint(snap(wx), snap(wy));
+          finalizeWire(interaction.from, settle);
+        }
+      }
+      setInteraction({ kind: "idle" });
       return;
     }
 
+    // 2) Pin click → start wiring (or probe).
     const pin = findPinAt(wx, wy);
     if (pin) {
       if (props.probeMode) {
@@ -143,24 +249,78 @@ export function SchematicCanvas(props: Props) {
           props.onProbePick({
             componentId: pin.componentId,
             pin: pin.pin,
-            netLabel: netLabelFor(pin),
+            netLabel: netLabelFor(pin.componentId, pin.pin),
             x: p.x,
             y: p.y
           });
         }
         return;
       }
-      setInteraction({ kind: "wiring", from: pin, cursorX: wx, cursorY: wy });
+      setInteraction({
+        kind: "wiring",
+        from: pinEndpoint(pin.componentId, pin.pin),
+        cursorX: wx,
+        cursorY: wy
+      });
       return;
     }
 
+    // 3) Free-endpoint click → resume wiring from that point.
+    const free = findFreeEndpointAt(wx, wy);
+    if (free) {
+      setInteraction({
+        kind: "wiring",
+        from: pointEndpoint(free.x, free.y),
+        cursorX: free.x,
+        cursorY: free.y
+      });
+      return;
+    }
+
+    // 4) Component click → select / start move.
     const hit = findComponentAt(wx, wy);
     if (hit) {
-      props.onSelect(hit.id);
-      setInteraction({ kind: "moving", id: hit.id, offsetX: wx - hit.x, offsetY: wy - hit.y });
-    } else {
-      props.onSelect(null);
+      const additive = e.shiftKey;
+      const alreadySelected = props.selectedIds.has(hit.id);
+      let nextSel: Set<string>;
+      if (additive) {
+        nextSel = new Set(props.selectedIds);
+        if (alreadySelected) nextSel.delete(hit.id);
+        else nextSel.add(hit.id);
+      } else if (alreadySelected) {
+        nextSel = new Set(props.selectedIds);
+      } else {
+        nextSel = new Set([hit.id]);
+      }
+      props.onSelect(nextSel);
+      // Build origin map for selected components so we can drag the group.
+      const origin = new Map<string, { x: number; y: number }>();
+      for (const id of nextSel) {
+        const cc = componentsById.get(id);
+        if (cc) origin.set(id, { x: cc.x, y: cc.y });
+      }
+      setInteraction({
+        kind: "moving",
+        ids: Array.from(nextSel),
+        anchorWX: wx,
+        anchorWY: wy,
+        origin
+      });
+      return;
     }
+
+    // 5) Wire click → toggle that wire's selection.
+    const wireHit = findWireAt(wx, wy);
+    if (wireHit) {
+      toggleSelection(wireHit.id, e.shiftKey);
+      return;
+    }
+
+    // 6) Empty canvas → start marquee select (or clear selection on shift+empty).
+    if (!e.shiftKey) {
+      setSelection([]);
+    }
+    setInteraction({ kind: "marquee", startWX: wx, startWY: wy, cursorWX: wx, cursorWY: wy });
   }
 
   function onMouseMove(e: React.MouseEvent<HTMLCanvasElement>) {
@@ -178,38 +338,73 @@ export function SchematicCanvas(props: Props) {
       return;
     }
     if (interaction.kind === "moving") {
-      const id = interaction.id;
-      const ox = interaction.offsetX;
-      const oy = interaction.offsetY;
+      const dx = wx - interaction.anchorWX;
+      const dy = wy - interaction.anchorWY;
+      const origin = interaction.origin;
       props.onSetComponents((cur) =>
-        cur.map((c) => (c.id === id ? { ...c, x: snap(wx - ox), y: snap(wy - oy) } : c))
+        cur.map((c) => {
+          const o = origin.get(c.id);
+          return o ? { ...c, x: snap(o.x + dx), y: snap(o.y + dy) } : c;
+        })
       );
       return;
     }
     if (interaction.kind === "wiring") {
       setInteraction({ ...interaction, cursorX: wx, cursorY: wy });
     }
+    if (interaction.kind === "marquee") {
+      setInteraction({ ...interaction, cursorWX: wx, cursorWY: wy });
+    }
     setHoverPin(findPinAt(wx, wy));
+    setHoverFreePoint(findFreeEndpointAt(wx, wy));
   }
 
-  function onMouseUp(e: React.MouseEvent<HTMLCanvasElement>) {
-    const { wx, wy } = clientToWorld(e.clientX, e.clientY);
-    if (interaction.kind === "wiring") {
-      const target = findPinAt(wx, wy);
-      if (target && !(target.componentId === interaction.from.componentId && target.pin === interaction.from.pin)) {
-        const candidate: CanvasWire = {
-          id: `w-${Math.random().toString(36).slice(2, 8)}`,
-          start: interaction.from,
-          end: target
-        };
-        props.onSetWires((cur) => {
-          const existing = new Set(cur.map(wireKey));
-          if (existing.has(wireKey(candidate))) return cur;
-          return [...cur, candidate];
-        });
+  function onMouseUp(_e: React.MouseEvent<HTMLCanvasElement>) {
+    if (interaction.kind === "marquee") {
+      const { startWX, startWY, cursorWX, cursorWY } = interaction;
+      // Only treat as a marquee if the box is non-trivial; otherwise leave
+      // selection cleared from mousedown.
+      if (Math.hypot(cursorWX - startWX, cursorWY - startWY) > 4) {
+        const minx = Math.min(startWX, cursorWX);
+        const maxx = Math.max(startWX, cursorWX);
+        const miny = Math.min(startWY, cursorWY);
+        const maxy = Math.max(startWY, cursorWY);
+        const picked: string[] = [];
+        for (const c of props.components) {
+          const b = componentBounds(c);
+          const cx = b.x + b.w / 2;
+          const cy = b.y + b.h / 2;
+          if (cx >= minx && cx <= maxx && cy >= miny && cy <= maxy) picked.push(c.id);
+        }
+        for (const w of props.wires) {
+          const a = endpointXY(w.start, componentsById);
+          const b = endpointXY(w.end, componentsById);
+          if (!a || !b) continue;
+          if (
+            a.x >= minx && a.x <= maxx && a.y >= miny && a.y <= maxy &&
+            b.x >= minx && b.x <= maxx && b.y >= miny && b.y <= maxy
+          ) picked.push(w.id);
+        }
+        setSelection(picked);
       }
     }
-    setInteraction({ kind: "idle" });
+    if (interaction.kind !== "wiring") {
+      setInteraction({ kind: "idle" });
+    }
+  }
+
+  function finalizeWire(from: WireEndpoint, to: WireEndpoint): void {
+    if (sameEndpoint(from, to)) return;
+    const candidate: CanvasWire = {
+      id: `w-${Math.random().toString(36).slice(2, 8)}`,
+      start: from,
+      end: to
+    };
+    props.onSetWires((cur) => {
+      const existing = new Set(cur.map(wireKey));
+      if (existing.has(wireKey(candidate))) return cur;
+      return [...cur, candidate];
+    });
   }
 
   function onWheel(e: React.WheelEvent<HTMLCanvasElement>) {
@@ -225,20 +420,88 @@ export function SchematicCanvas(props: Props) {
     setPan({ x: nx, y: ny, scale: newScale });
   }
 
+  function deleteSelection(): void {
+    if (props.selectedIds.size === 0) return;
+    const sel = props.selectedIds;
+    props.onSetComponents((cur) => cur.filter((c) => !sel.has(c.id)));
+    props.onSetWires((cur) =>
+      cur.filter((w) => {
+        if (sel.has(w.id)) return false;
+        if (w.start.kind === "pin" && sel.has(w.start.componentId)) return false;
+        if (w.end.kind === "pin" && sel.has(w.end.componentId)) return false;
+        return true;
+      })
+    );
+    props.onSelect(new Set());
+  }
+
+  function copySelection(): void {
+    const sel = props.selectedIds;
+    if (sel.size === 0) return;
+    const comps = props.components.filter((c) => sel.has(c.id));
+    const compSet = new Set(comps.map((c) => c.id));
+    // Include wires whose both endpoints are within the selection (or a free
+    // point), or wires explicitly selected.
+    const wires = props.wires.filter((w) => {
+      if (sel.has(w.id)) return true;
+      const startOk =
+        w.start.kind === "point" ||
+        (w.start.kind === "pin" && compSet.has(w.start.componentId));
+      const endOk =
+        w.end.kind === "point" ||
+        (w.end.kind === "pin" && compSet.has(w.end.componentId));
+      return startOk && endOk;
+    });
+    props.onCopy({
+      components: comps.map((c) => ({ ...c })),
+      wires: wires.map((w) => ({
+        ...w,
+        start:
+          w.start.kind === "pin"
+            ? { kind: "pin", componentId: w.start.componentId, pin: w.start.pin }
+            : { kind: "point", x: w.start.x, y: w.start.y },
+        end:
+          w.end.kind === "pin"
+            ? { kind: "pin", componentId: w.end.componentId, pin: w.end.pin }
+            : { kind: "point", x: w.end.x, y: w.end.y }
+      }))
+    });
+  }
+
   function onKeyDown(e: React.KeyboardEvent<HTMLCanvasElement>) {
-    if (!props.selectedId) return;
     if (e.key === "Delete" || e.key === "Backspace") {
-      const id = props.selectedId;
-      props.onSetComponents((cur) => cur.filter((c) => c.id !== id));
-      props.onSetWires((cur) =>
-        cur.filter((w) => w.start.componentId !== id && w.end.componentId !== id)
-      );
-      props.onSelect(null);
-      e.preventDefault();
+      if (props.selectedIds.size > 0) {
+        deleteSelection();
+        e.preventDefault();
+      }
+    } else if (e.key === "Escape") {
+      if (interaction.kind === "wiring" || interaction.kind === "marquee") {
+        setInteraction({ kind: "idle" });
+      }
+      props.onSelect(new Set());
     } else if (e.key.toLowerCase() === "r") {
-      props.onSetComponents((cur) =>
-        cur.map((c) => (c.id === props.selectedId ? { ...c, rotation: ((c.rotation + 90) % 360) as CanvasComponent["rotation"] } : c))
-      );
+      // Rotate every selected component 90° clockwise.
+      if (props.selectedIds.size > 0) {
+        props.onSetComponents((cur) =>
+          cur.map((c) =>
+            props.selectedIds.has(c.id)
+              ? { ...c, rotation: ((c.rotation + 90) % 360) as CanvasComponent["rotation"] }
+              : c
+          )
+        );
+      }
+    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "c") {
+      copySelection();
+      e.preventDefault();
+    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "v") {
+      props.onPaste();
+      e.preventDefault();
+    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") {
+      const all = new Set<string>();
+      props.components.forEach((c) => all.add(c.id));
+      props.wires.forEach((w) => all.add(w.id));
+      props.onSelect(all);
+      e.preventDefault();
     }
   }
 
@@ -266,16 +529,82 @@ export function SchematicCanvas(props: Props) {
     ctx.translate(pan.x, pan.y);
     ctx.scale(pan.scale, pan.scale);
 
+    // Precompute obstacle bounds per component so the router can avoid crossing bodies.
+    const obstacleBounds = new Map<string, { x: number; y: number; w: number; h: number }>();
+    for (const c of props.components) {
+      obstacleBounds.set(c.id, componentBounds(c));
+    }
+
+    // Net assignment for label rendering (mirrors backend union-find so the
+    // canvas shows the same names the simulator will use). Cheap to recompute
+    // on every draw — the union-find scales with pin + wire count.
+    const nets = computeNetAssignments(props.components, props.wires);
+    // Track which nets we've labeled at which approximate coordinates so we
+    // don't repeat the same name on every segment of a long net.
+    const labeledNetsAt = new Map<string, { x: number; y: number }>();
+
     // Wires
-    ctx.strokeStyle = DEFAULT_THEME.accent;
-    ctx.lineWidth = 1.8;
     for (const wire of props.wires) {
-      const a = componentsById.get(wire.start.componentId);
-      const b = componentsById.get(wire.end.componentId);
+      const a = endpointXY(wire.start, componentsById);
+      const b = endpointXY(wire.end, componentsById);
       if (!a || !b) continue;
-      const p1 = getPinCoordinates(a, wire.start.pin);
-      const p2 = getPinCoordinates(b, wire.end.pin);
-      drawOrthoWire(ctx, p1.x, p1.y, p2.x, p2.y);
+      const obstacles: { x: number; y: number; w: number; h: number }[] = [];
+      const startOwner = wire.start.kind === "pin" ? wire.start.componentId : null;
+      const endOwner = wire.end.kind === "pin" ? wire.end.componentId : null;
+      for (const [cid, bounds] of obstacleBounds) {
+        if (cid !== startOwner && cid !== endOwner) obstacles.push(bounds);
+      }
+      ctx.save();
+      const isSelected = props.selectedIds.has(wire.id);
+      ctx.strokeStyle = isSelected ? "#ffd26d" : DEFAULT_THEME.accent;
+      ctx.lineWidth = isSelected ? 2.4 : 1.8;
+      drawOrthoWire(ctx, a.x, a.y, b.x, b.y, obstacles);
+      ctx.restore();
+
+      // Free endpoint markers
+      for (const ep of [wire.start, wire.end]) {
+        if (ep.kind !== "point") continue;
+        ctx.save();
+        ctx.fillStyle = "#0b0f17";
+        ctx.strokeStyle = DEFAULT_THEME.accent;
+        ctx.lineWidth = 1.4;
+        ctx.beginPath();
+        ctx.arc(ep.x, ep.y, 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      // Net-name label near wire midpoint. Ground rails are left unlabeled to
+      // avoid visual clutter (the GND symbol itself carries the meaning).
+      const netName = nets.byWire.get(wire.id);
+      if (netName && netName !== "0" && netName !== "?") {
+        const mx = (a.x + b.x) / 2;
+        const my = (a.y + b.y) / 2;
+        const last = labeledNetsAt.get(netName);
+        if (!last || Math.hypot(last.x - mx, last.y - my) > 90) {
+          labeledNetsAt.set(netName, { x: mx, y: my });
+          drawNetLabel(ctx, mx, my, netName);
+        }
+      }
+    }
+
+    // Named junctions (e.g. SUBCKT port_in / port_out markers). These render
+    // as a distinct ringed dot with the junction id, so users can see exactly
+    // where a sub-level exposes its external pins.
+    for (const j of props.junctions ?? []) {
+      ctx.save();
+      ctx.fillStyle = "#ffd26d";
+      ctx.strokeStyle = "#ffd26d";
+      ctx.lineWidth = 1.8;
+      ctx.beginPath();
+      ctx.arc(j.x, j.y, 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(j.x, j.y, 9, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+      drawNetLabel(ctx, j.x, j.y, j.id);
     }
 
     // Components
@@ -292,7 +621,7 @@ export function SchematicCanvas(props: Props) {
         ctx.fillStyle = DEFAULT_THEME.muted;
         ctx.fillText(c.value, c.x, b.y + b.h + 18);
       }
-      if (props.selectedId === c.id) {
+      if (props.selectedIds.has(c.id)) {
         ctx.save();
         ctx.strokeStyle = DEFAULT_THEME.accent;
         ctx.setLineDash([4, 3]);
@@ -304,8 +633,7 @@ export function SchematicCanvas(props: Props) {
       const pins = getPinsForType(c.type, c);
       for (const pin of pins) {
         const p = getPinCoordinates(c, pin);
-        const isHover =
-          hoverPin?.componentId === c.id && hoverPin.pin === pin;
+        const isHover = hoverPin?.componentId === c.id && hoverPin.pin === pin;
         ctx.beginPath();
         ctx.fillStyle = isHover ? DEFAULT_THEME.accent : "#25304a";
         ctx.strokeStyle = DEFAULT_THEME.accent;
@@ -318,16 +646,41 @@ export function SchematicCanvas(props: Props) {
 
     // In-flight wire
     if (interaction.kind === "wiring") {
-      const a = componentsById.get(interaction.from.componentId);
-      if (a) {
-        const p = getPinCoordinates(a, interaction.from.pin);
+      const fromXY = endpointXY(interaction.from, componentsById);
+      if (fromXY) {
+        const previewObstacles = Array.from(obstacleBounds.entries())
+          .filter(([cid]) => interaction.from.kind === "pin" && cid !== interaction.from.componentId)
+          .map(([, b]) => b);
         ctx.save();
         ctx.strokeStyle = DEFAULT_THEME.accent;
         ctx.setLineDash([4, 3]);
         ctx.lineWidth = 1.6;
-        drawOrthoWire(ctx, p.x, p.y, interaction.cursorX, interaction.cursorY);
+        drawOrthoWire(
+          ctx,
+          fromXY.x,
+          fromXY.y,
+          interaction.cursorX,
+          interaction.cursorY,
+          previewObstacles
+        );
         ctx.restore();
       }
+    }
+
+    // Marquee box
+    if (interaction.kind === "marquee") {
+      const minx = Math.min(interaction.startWX, interaction.cursorWX);
+      const maxx = Math.max(interaction.startWX, interaction.cursorWX);
+      const miny = Math.min(interaction.startWY, interaction.cursorWY);
+      const maxy = Math.max(interaction.startWY, interaction.cursorWY);
+      ctx.save();
+      ctx.strokeStyle = DEFAULT_THEME.accent;
+      ctx.fillStyle = "rgba(110,168,255,0.08)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 3]);
+      ctx.fillRect(minx, miny, maxx - minx, maxy - miny);
+      ctx.strokeRect(minx, miny, maxx - minx, maxy - miny);
+      ctx.restore();
     }
 
     // Probe-mode crosshair
@@ -343,6 +696,17 @@ export function SchematicCanvas(props: Props) {
         ctx.stroke();
         ctx.restore();
       }
+    }
+
+    // Free-endpoint hover ring
+    if (hoverFreePoint && interaction.kind !== "wiring") {
+      ctx.save();
+      ctx.strokeStyle = "#ffd26d";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(hoverFreePoint.x, hoverFreePoint.y, 8, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
     }
 
     ctx.restore();
@@ -382,12 +746,20 @@ export function SchematicCanvas(props: Props) {
         onMouseUp={onMouseUp}
         onMouseLeave={() => {
           setHoverPin(null);
+          setHoverFreePoint(null);
           setMousePos(null);
         }}
         onWheel={onWheel}
         onKeyDown={onKeyDown}
         style={{
-          cursor: props.pendingDevice ? "copy" : props.probeMode ? "crosshair" : "default"
+          cursor:
+            props.pendingDevice
+              ? "copy"
+              : props.probeMode
+                ? "crosshair"
+                : interaction.kind === "wiring"
+                  ? "crosshair"
+                  : "default"
         }}
       />
       {hoverPin && mousePos ? (
@@ -395,7 +767,7 @@ export function SchematicCanvas(props: Props) {
           className="hoverBadge"
           style={{ left: mousePos.x + 10, top: mousePos.y + 14 }}
         >
-          {netLabelFor(hoverPin)}
+          {netLabelFor(hoverPin.componentId, hoverPin.pin)}
         </div>
       ) : null}
       {props.probeMode ? (
@@ -403,8 +775,68 @@ export function SchematicCanvas(props: Props) {
           Probe mode — click a pin to add a live .dyn tile
         </div>
       ) : null}
+      {interaction.kind === "wiring" ? (
+        <div className="nodeProbeHint" style={{ right: 16, top: 16 }}>
+          Wiring — click a pin to finish, click empty space to drop a free joint, Esc to cancel
+        </div>
+      ) : null}
     </div>
   );
+}
+
+function sameEndpoint(a: WireEndpoint, b: WireEndpoint): boolean {
+  if (a.kind !== b.kind) return false;
+  if (a.kind === "pin" && b.kind === "pin") {
+    return a.componentId === b.componentId && a.pin === b.pin;
+  }
+  if (a.kind === "point" && b.kind === "point") {
+    return a.x === b.x && a.y === b.y;
+  }
+  return false;
+}
+
+function pointNearSegment(
+  px: number,
+  py: number,
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+  tol: number
+): boolean {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const len2 = dx * dx + dy * dy;
+  if (len2 === 0) return Math.hypot(px - ax, py - ay) < tol;
+  let t = ((px - ax) * dx + (py - ay) * dy) / len2;
+  t = Math.max(0, Math.min(1, t));
+  const cx = ax + dx * t;
+  const cy = ay + dy * t;
+  return Math.hypot(px - cx, py - cy) < tol;
+}
+
+function drawNetLabel(ctx: CanvasRenderingContext2D, x: number, y: number, name: string) {
+  ctx.save();
+  ctx.font = "600 10px Inter, system-ui, sans-serif";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  const padding = 4;
+  const metrics = ctx.measureText(name);
+  const boxW = metrics.width + padding * 2;
+  const boxH = 14;
+  // Offset slightly above the wire so the box doesn't sit on top of the line.
+  const bx = x + 6;
+  const by = y - boxH / 2 - 4;
+  ctx.fillStyle = "rgba(11,15,23,0.85)";
+  ctx.strokeStyle = "rgba(110,168,255,0.6)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.rect(bx, by, boxW, boxH);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = "#cfe1ff";
+  ctx.fillText(name, bx + padding, by + boxH / 2);
+  ctx.restore();
 }
 
 function drawGrid(ctx: CanvasRenderingContext2D, w: number, h: number, pan: PanState) {
@@ -446,13 +878,81 @@ function drawGrid(ctx: CanvasRenderingContext2D, w: number, h: number, pan: PanS
   ctx.restore();
 }
 
-function drawOrthoWire(ctx: CanvasRenderingContext2D, x1: number, y1: number, x2: number, y2: number) {
+type Rect = { x: number; y: number; w: number; h: number };
+
+function segmentCrossesRect(
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+  rect: Rect,
+  pad = 4
+): boolean {
+  const rx1 = rect.x + pad;
+  const ry1 = rect.y + pad;
+  const rx2 = rect.x + rect.w - pad;
+  const ry2 = rect.y + rect.h - pad;
+  if (rx2 <= rx1 || ry2 <= ry1) return false;
+  let t0 = 0;
+  let t1 = 1;
+  const dx = bx - ax;
+  const dy = by - ay;
+  const clip = (p: number, q: number): boolean => {
+    if (p === 0) return q >= 0;
+    const r = q / p;
+    if (p < 0) {
+      if (r > t1) return false;
+      if (r > t0) t0 = r;
+    } else {
+      if (r < t0) return false;
+      if (r < t1) t1 = r;
+    }
+    return true;
+  };
+  if (!clip(-dx, ax - rx1)) return false;
+  if (!clip(dx, rx2 - ax)) return false;
+  if (!clip(-dy, ay - ry1)) return false;
+  if (!clip(dy, ry2 - ay)) return false;
+  return t1 > t0;
+}
+
+function countCrossings(
+  obstacles: Rect[],
+  segments: [number, number, number, number][]
+): number {
+  let n = 0;
+  for (const [ax, ay, bx, by] of segments) {
+    for (const r of obstacles) {
+      if (segmentCrossesRect(ax, ay, bx, by, r)) n++;
+    }
+  }
+  return n;
+}
+
+function drawOrthoWire(
+  ctx: CanvasRenderingContext2D,
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  obstacles: Rect[] = []
+) {
+  const hFirst: [number, number, number, number][] = [
+    [x1, y1, x2, y1],
+    [x2, y1, x2, y2]
+  ];
+  const vFirst: [number, number, number, number][] = [
+    [x1, y1, x1, y2],
+    [x1, y2, x2, y2]
+  ];
+  const hCross = countCrossings(obstacles, hFirst);
+  const vCross = countCrossings(obstacles, vFirst);
+  const segments = vCross < hCross ? vFirst : hFirst;
+
   ctx.beginPath();
   ctx.moveTo(x1, y1);
-  // L-shaped: horizontal first then vertical.
-  const mx = x2;
-  const my = y1;
-  ctx.lineTo(mx, my);
-  ctx.lineTo(x2, y2);
+  for (const [, , ex, ey] of segments) {
+    ctx.lineTo(ex, ey);
+  }
   ctx.stroke();
 }

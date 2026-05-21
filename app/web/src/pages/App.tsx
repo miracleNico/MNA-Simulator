@@ -2,9 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { LeftPane } from "../components/LeftPane";
 import { PlotTile } from "../components/PlotTile";
-import { ProbeTarget, SchematicCanvas } from "../components/SchematicCanvas";
+import { ClipboardData, ProbeTarget, SchematicCanvas } from "../components/SchematicCanvas";
 import { Toolbar } from "../components/Toolbar";
-import { SCHEMATIC_PRESETS } from "../lib/demoPresets";
+import { HIDDEN_DEMO_PRESETS, SCHEMATIC_PRESETS } from "../lib/demoPresets";
 import { PlotData } from "../lib/plot";
 import {
   AnalysisState,
@@ -12,8 +12,8 @@ import {
   CanvasWire,
   DeviceType,
   SchematicLevel,
-  buildSchematicPayload,
-  createDefaultComponent
+  SchematicPreset,
+  buildSchematicPayload
 } from "../lib/schematic";
 
 const defaultAnalysis: AnalysisState = {
@@ -24,8 +24,11 @@ const defaultAnalysis: AnalysisState = {
   fStop: "10000",
   points: 100,
   harmonics: 8,
+  hbTimeWindow: "",
   dynSpeed: "1m",
-  probeNodes: []
+  dynWindow: "5m",
+  probeNodes: [],
+  continuous: false
 };
 
 type TileRecord = {
@@ -43,9 +46,15 @@ type TileRecord = {
   /** Probe target for dyn tiles. */
   probe?: ProbeTarget;
   socket?: WebSocket;
+  /** Rolling display window in sim seconds (dyn tiles only). */
+  windowSeconds?: number;
 };
 
-const LIBRARY_ITEMS: DeviceType[] = ["R", "C", "L", "V", "I", "D", "GND", "VCVS", "VCCS", "CCCS", "CCVS", "SUBCKT"];
+const LIBRARY_ITEMS: DeviceType[] = [
+  "R", "C", "L", "V", "I", "D", "GND",
+  "QNPN", "QPNP", "NMOS", "PMOS",
+  "VCVS", "VCCS", "CCCS", "CCVS", "SUBCKT"
+];
 
 function genId(prefix: string): string {
   return `${prefix}-${Math.random().toString(36).slice(2, 9)}`;
@@ -53,19 +62,16 @@ function genId(prefix: string): string {
 
 export function App() {
   /* -------------- Hierarchy levels -------------- */
-  const [levels, setLevels] = useState<SchematicLevel[]>(() => {
-    const preset = SCHEMATIC_PRESETS[0];
-    return [
-      {
-        id: "root",
-        title: "Top level",
-        components: preset.components.map((c) => ({ ...c })),
-        wires: preset.wires.map((w) => ({ ...w, start: { ...w.start }, end: { ...w.end } })),
-        pins: [],
-        parentId: null
-      }
-    ];
-  });
+  const [levels, setLevels] = useState<SchematicLevel[]>(() => [
+    {
+      id: "root",
+      title: "Top level",
+      components: [],
+      wires: [],
+      pins: [],
+      parentId: null
+    }
+  ]);
   const [activeLevelId, setActiveLevelId] = useState<string>("root");
 
   const activeLevel = levels.find((l) => l.id === activeLevelId)!;
@@ -98,7 +104,7 @@ export function App() {
 
   /* -------------- Analysis & UI state -------------- */
   const [analysis, setAnalysis] = useState<AnalysisState>({ ...defaultAnalysis });
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [pendingDevice, setPendingDevice] = useState<DeviceType | null>(null);
   const [probeMode, setProbeMode] = useState(false);
   const [running, setRunning] = useState(false);
@@ -107,6 +113,8 @@ export function App() {
   const [generatedNetlist, setGeneratedNetlist] = useState<string>("");
   const [responsePreview, setResponsePreview] = useState<string>("");
   const [tiles, setTiles] = useState<TileRecord[]>([]);
+  const [clipboard, setClipboard] = useState<ClipboardData | null>(null);
+  const [demoOpen, setDemoOpen] = useState(false);
   const tileCounterRef = useRef(1);
 
   /* -------------- Derived helpers -------------- */
@@ -119,31 +127,43 @@ export function App() {
           ? `.tran ${analysis.tStop} ${analysis.tStep}`
           : analysis.mode === "ac"
             ? `.ac ${analysis.fStart} ${analysis.fStop} ${analysis.points}`
-            : analysis.mode === "hb"
-              ? `.hb ${analysis.harmonics}`
-              : `.dyn ${analysis.dynSpeed}`;
+            : analysis.hbTimeWindow.trim()
+              ? `.hb ${analysis.harmonics} ${analysis.hbTimeWindow.trim()}`
+              : `.hb ${analysis.harmonics}`;
     const lines = activeLevel.components
       .filter((c) => c.type !== "GND")
       .map((c) => `${c.name} <${c.type}> ${c.value}${c.subtype ? ` [${c.subtype}]` : ""}`);
     return [...lines, modeLine, ".end"].join("\n");
   }, [activeLevel.components, analysis]);
 
+  /**
+   * The probe-node picker lists labels exactly as they appear in the plot
+   * (``V(<net>)`` and ``I(<branch>)``). Storing the full label in
+   * ``analysis.probeNodes`` lets the waveform filter do a direct string match
+   * — otherwise "n1" picks would never line up with "V(n1)" series.
+   */
   const availableNodes = useMemo(() => {
-    // After a backend run we have access to result labels through generatedNetlist parse,
-    // but an always-available fallback is the visible component names with .p/.n pins.
-    const netSet = new Set<string>();
+    const nodeSet = new Set<string>();
+    const branchSet = new Set<string>();
     const lines = generatedNetlist.split(/\r?\n/);
     for (const raw of lines) {
       const tok = raw.trim().split(/\s+/);
       if (tok.length < 3) continue;
       if (raw.startsWith(".") || raw.startsWith("*")) continue;
-      // First two tokens after device name are nodes (for passive), 4th and 5th for VCVS/VCCS, etc.
+      // device name → branch label for V/L/E/H lines (they generate a branch row).
+      const dev = tok[0].toUpperCase();
+      if (dev.startsWith("V") || dev.startsWith("L") || dev.startsWith("E") || dev.startsWith("H")) {
+        branchSet.add(tok[0]);
+      }
+      // First two tokens after the name are nodes (passive form), 4th/5th for VCVS/VCCS, etc.
       const n1 = tok[1];
       const n2 = tok[2];
-      if (n1 && n1 !== "0") netSet.add(n1);
-      if (n2 && n2 !== "0") netSet.add(n2);
+      if (n1 && n1 !== "0") nodeSet.add(n1);
+      if (n2 && n2 !== "0") nodeSet.add(n2);
     }
-    return Array.from(netSet).sort();
+    const nodes = Array.from(nodeSet).sort().map((n) => `V(${n})`);
+    const branches = Array.from(branchSet).sort().map((b) => `I(${b})`);
+    return [...nodes, ...branches];
   }, [generatedNetlist]);
 
   /* -------------- Toolbar / library -------------- */
@@ -166,12 +186,6 @@ export function App() {
 
   const runSimulation = useCallback(async () => {
     if (running) return;
-    if (analysis.mode === "dyn") {
-      setStatusMsg("Click a pin in probe mode to open a live tile.");
-      setProbeMode(true);
-      setStatus("idle");
-      return;
-    }
     setRunning(true);
     setStatus("running");
     setStatusMsg("");
@@ -214,14 +228,27 @@ export function App() {
             data
           });
         } else if (analysis.mode === "ac" && body.spectrum) {
-          const data = toSpectrumPlot(body.spectrum);
+          const data = toSpectrumPlot(body.spectrum, "line");
           addTile({ title: `.ac sweep`, mode: "static", data });
         } else if (analysis.mode === "hb" && body.spectrum) {
-          const data = toSpectrumPlot(body.spectrum);
-          addTile({ title: `.hb harmonics`, mode: "static", data });
+          const f0 = Number(body?.metadata?.base_frequency_hz ?? 0);
+          const data = toSpectrumPlot(body.spectrum, "stem");
+          addTile({
+            title: f0 > 0 ? `.hb spectrum · f0 ${formatCompact(f0)}Hz` : `.hb spectrum`,
+            mode: "static",
+            data,
+            w: 520,
+            h: 300
+          });
         } else if (analysis.mode === "hb" && body.waveform) {
-          const data = toPlotData(body.waveform, "time (s)", "V");
-          addTile({ title: `.hb waveform`, mode: "static", data });
+          const data = toPlotData(body.waveform, "time (s)", "V", analysis.probeNodes);
+          addTile({
+            title: `.hb reconstruct — ${analysis.hbTimeWindow || "window"}`,
+            mode: "static",
+            data,
+            w: 520,
+            h: 300
+          });
         } else if (analysis.mode === "op" && body.dc_solution) {
           addTile({
             title: `.op — DC solution`,
@@ -242,30 +269,35 @@ export function App() {
 
   const onProbePick = useCallback(
     (target: ProbeTarget) => {
-      // Resolve node label through backend-generated netlist; fallback to name.p/.n.
       const payload = buildSchematicPayload(
         activeLevel.components,
         activeLevel.wires,
-        { ...analysis, mode: "dyn" },
+        analysis,
         levels
       );
       const speed = parseValue(analysis.dynSpeed);
+      const tStopSim = parseValue(analysis.tStop);
+      const wallDuration = speed > 0 ? tStopSim / speed : 0;
+      const windowSim = parseValue(analysis.dynWindow);
       const tileId = genId("tile");
       const nodeLabel = target.netLabel ?? `${target.componentId}.${target.pin}`;
 
-      // Temporarily no node filter — we'll filter client-side on push.
       const proto = location.protocol === "https:" ? "wss" : "ws";
       const ws = new WebSocket(`${proto}://${location.host}/ws/dyn`);
+      const titleSuffix = analysis.continuous
+        ? "∞"
+        : `${wallDuration.toFixed(wallDuration >= 10 ? 0 : 1)}s`;
       const tileRecord: TileRecord = {
         id: tileId,
-        title: `.dyn ${nodeLabel} @ ${analysis.dynSpeed}s/s`,
+        title: `.dyn ${nodeLabel} @ ${analysis.dynSpeed}s/s · ${titleSuffix}`,
         x: Math.max(40, target.x + 60),
         y: Math.max(40, target.y - 80),
-        w: 360,
-        h: 220,
+        w: 380,
+        h: 240,
         mode: "dyn",
         socket: ws,
-        probe: target
+        probe: target,
+        windowSeconds: windowSim
       };
       setTiles((cur) => [...cur, tileRecord]);
 
@@ -275,27 +307,27 @@ export function App() {
             schematic: payload,
             speed,
             t_stop: analysis.tStop,
-            t_step: analysis.tStep
+            t_step: analysis.tStep,
+            window: analysis.dynWindow,
+            pin_refs: [{ component_id: target.componentId, pin: target.pin }],
+            continuous: analysis.continuous
           })
         );
       };
-      let labels: string[] = [];
-      let wantedIdx = -1;
+
+      let streamLabels: string[] = [];
       ws.onmessage = (e) => {
         const msg = JSON.parse(e.data);
         if (msg.type === "meta") {
-          labels = msg.labels ?? [];
-          // Match probe to a specific net label.
-          wantedIdx = labels.findIndex(
-            (l) => l === nodeLabel || l.endsWith(`.${target.pin}`) || l.includes(target.componentId)
-          );
-          if (wantedIdx < 0) wantedIdx = 0;
+          streamLabels = msg.labels ?? [];
         } else if (msg.type === "frame") {
           const rec = tilesRef.current.get(tileId);
-          if (rec?.push && labels.length > 0) {
-            const displayLabel = labels[wantedIdx] ?? labels[0];
-            rec.push(Number(msg.t), [Number(msg.values[wantedIdx] ?? 0)], [displayLabel]);
+          if (rec?.push && streamLabels.length > 0) {
+            const vals = (msg.values as number[]).map((v) => Number(v) || 0);
+            rec.push(Number(msg.t), vals, streamLabels);
           }
+        } else if (msg.type === "loop") {
+          // continuous boundary — no-op
         } else if (msg.type === "done") {
           const rec = tilesRef.current.get(tileId);
           rec?.finalize?.();
@@ -362,32 +394,47 @@ export function App() {
     []
   );
 
-  /* -------------- Presets -------------- */
+  /* -------------- Presets / demos -------------- */
 
-  const loadPreset = useCallback(
-    (presetId: string) => {
-      const preset = SCHEMATIC_PRESETS.find((p) => p.id === presetId);
-      if (!preset) return;
-      setLevels([
-        {
-          id: "root",
-          title: preset.title,
-          components: preset.components.map((c) => ({ ...c })),
-          wires: preset.wires.map((w) => ({ ...w, start: { ...w.start }, end: { ...w.end } })),
-          pins: [],
-          parentId: null
-        }
-      ]);
-      setActiveLevelId("root");
-      setAnalysis({ ...defaultAnalysis, ...preset.analysis });
-      setSelectedId(null);
-      setGeneratedNetlist("");
-      setResponsePreview("");
-      setStatus("idle");
-      setStatusMsg(`Preset "${preset.title}" loaded.`);
-    },
-    []
-  );
+  function applyPreset(preset: SchematicPreset) {
+    const rootLevel: SchematicLevel = {
+      id: "root",
+      title: preset.title,
+      components: preset.components.map((c) => ({ ...c })),
+      wires: preset.wires.map((w) => ({
+        ...w,
+        start: { ...w.start } as CanvasWire["start"],
+        end: { ...w.end } as CanvasWire["end"]
+      })),
+      pins: [],
+      parentId: null
+    };
+    const extras: SchematicLevel[] = (preset.extraLevels ?? []).map((lv) => ({
+      ...lv,
+      components: lv.components.map((c) => ({ ...c })),
+      wires: lv.wires.map((w) => ({
+        ...w,
+        start: { ...w.start } as CanvasWire["start"],
+        end: { ...w.end } as CanvasWire["end"]
+      })),
+      pins: [...lv.pins]
+    }));
+    setLevels([rootLevel, ...extras]);
+    setActiveLevelId("root");
+    setAnalysis({ ...defaultAnalysis, ...preset.analysis });
+    setSelectedIds(new Set());
+    setGeneratedNetlist("");
+    setResponsePreview("");
+    setStatus("idle");
+    setStatusMsg(`Preset "${preset.title}" loaded.`);
+  }
+
+  const loadPreset = useCallback((presetId: string) => {
+    const preset =
+      SCHEMATIC_PRESETS.find((p) => p.id === presetId) ??
+      HIDDEN_DEMO_PRESETS.find((p) => p.id === presetId);
+    if (preset) applyPreset(preset);
+  }, []);
 
   /* -------------- Hierarchy handlers -------------- */
 
@@ -405,13 +452,82 @@ export function App() {
   }
   function deleteLevel(id: string) {
     if (id === "root") return;
-    setLevels((cur) => cur.filter((l) => l.id !== id && l.parentId !== id));
-    if (activeLevelId === id) setActiveLevelId("root");
+    // Collect ``id`` plus every descendant via BFS so an entire subtree is
+    // dropped in one operation. Without this, deleting a parent would orphan
+    // its children, leaving stale entries in the hierarchy tree.
+    const doomed = new Set<string>([id]);
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const l of levels) {
+        if (!doomed.has(l.id) && l.parentId && doomed.has(l.parentId)) {
+          doomed.add(l.id);
+          grew = true;
+        }
+      }
+    }
+    setLevels((cur) => cur.filter((l) => !doomed.has(l.id)));
+    if (doomed.has(activeLevelId)) setActiveLevelId("root");
   }
+
+  /* -------------- Copy / paste -------------- */
+
+  const onCopy = useCallback((data: ClipboardData) => {
+    setClipboard(data);
+    setStatusMsg(`Copied ${data.components.length} component${data.components.length === 1 ? "" : "s"}.`);
+  }, []);
+
+  const onPaste = useCallback(() => {
+    if (!clipboard || clipboard.components.length === 0) return;
+    const idRemap = new Map<string, string>();
+    const dx = 40;
+    const dy = 40;
+    const newComponents: CanvasComponent[] = clipboard.components.map((c) => {
+      const newId = genId(c.type.toLowerCase());
+      idRemap.set(c.id, newId);
+      // Bump trailing-number in name if present so we don't duplicate names.
+      const m = c.name.match(/^([A-Za-z_]+)(\d+)$/);
+      const newName = m ? `${m[1]}${Number(m[2]) + 1000}` : `${c.name}_copy`;
+      return { ...c, id: newId, name: newName, x: c.x + dx, y: c.y + dy };
+    });
+    const newWires: CanvasWire[] = clipboard.wires.map((w) => {
+      const start =
+        w.start.kind === "pin"
+          ? {
+              kind: "pin" as const,
+              componentId: idRemap.get(w.start.componentId) ?? w.start.componentId,
+              pin: w.start.pin
+            }
+          : { kind: "point" as const, x: w.start.x + dx, y: w.start.y + dy };
+      const end =
+        w.end.kind === "pin"
+          ? {
+              kind: "pin" as const,
+              componentId: idRemap.get(w.end.componentId) ?? w.end.componentId,
+              pin: w.end.pin
+            }
+          : { kind: "point" as const, x: w.end.x + dx, y: w.end.y + dy };
+      return {
+        id: `w-${Math.random().toString(36).slice(2, 8)}`,
+        start,
+        end
+      };
+    });
+    setActiveComponents((cur) => [...cur, ...newComponents]);
+    setActiveWires((cur) => [...cur, ...newWires]);
+    // Select the freshly pasted items so a follow-up drag affects only them.
+    const sel = new Set<string>();
+    newComponents.forEach((c) => sel.add(c.id));
+    newWires.forEach((w) => sel.add(w.id));
+    setSelectedIds(sel);
+  }, [clipboard, setActiveComponents, setActiveWires]);
 
   /* -------------- Render -------------- */
 
-  const selectedComponent = activeLevel.components.find((c) => c.id === selectedId) ?? null;
+  const selectedComponent =
+    selectedIds.size === 1
+      ? activeLevel.components.find((c) => selectedIds.has(c.id)) ?? null
+      : null;
 
   return (
     <div className="app">
@@ -424,6 +540,32 @@ export function App() {
           <button className="menubar__item">Edit</button>
           <button className="menubar__item">View</button>
           <button className="menubar__item">Simulate</button>
+          <div className="menubar__dropdown">
+            <button
+              className={`menubar__item ${demoOpen ? "open" : ""}`}
+              onClick={() => setDemoOpen((v) => !v)}
+              onBlur={() => setTimeout(() => setDemoOpen(false), 120)}
+            >
+              Demo
+            </button>
+            {demoOpen ? (
+              <div className="menubar__dropdownPanel">
+                {HIDDEN_DEMO_PRESETS.map((d) => (
+                  <button
+                    key={d.id}
+                    className="menubar__dropdownItem"
+                    onMouseDown={() => {
+                      applyPreset(d);
+                      setDemoOpen(false);
+                    }}
+                  >
+                    <strong>{d.title}</strong>
+                    <span className="menubar__dropdownDesc">{d.description}</span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
           <button className="menubar__item">Help</button>
         </div>
         <div className="menubar__spacer" />
@@ -470,14 +612,17 @@ export function App() {
         <SchematicCanvas
           components={activeLevel.components}
           wires={activeLevel.wires}
-          selectedId={selectedId}
+          junctions={activeLevel.junctions}
+          selectedIds={selectedIds}
           pendingDevice={pendingDevice}
           probeMode={probeMode}
           onSetComponents={setActiveComponents}
           onSetWires={setActiveWires}
-          onSelect={setSelectedId}
+          onSelect={setSelectedIds}
           onPendingResolved={() => setPendingDevice(null)}
           onProbePick={onProbePick}
+          onCopy={onCopy}
+          onPaste={onPaste}
         />
         <div className="tileLayer">
           {tiles.map((tile) => (
@@ -491,6 +636,7 @@ export function App() {
               h={tile.h}
               mode={tile.mode}
               data={tile.data}
+              windowSeconds={tile.windowSeconds}
               onMount={
                 tile.mode === "dyn"
                   ? (push, finalize) => {
@@ -512,9 +658,12 @@ export function App() {
         <span className="statusbar__slot">Level: {activeLevel.title}</span>
         <span className="statusbar__slot">
           {activeLevel.components.length} comp · {activeLevel.wires.length} wires
+          {selectedIds.size > 0 ? ` · ${selectedIds.size} selected` : ""}
         </span>
         <span style={{ flex: 1 }} />
-        <span className="statusbar__slot">Shift+drag: pan · wheel: zoom · R: rotate · Del: delete</span>
+        <span className="statusbar__slot">
+          Shift+click: multi-select · drag: marquee · Ctrl+C/V: copy/paste · R: rotate · Del: delete
+        </span>
       </div>
     </div>
   );
@@ -553,9 +702,6 @@ function toPlotData(
   const t = waveform.time ?? [];
   const vs = waveform.values ?? [];
   const labels = waveform.labels ?? [];
-  // values may come as [row][col] or [col][row] depending on ndarray. The backend
-  // uses utils.ndarray_to_list which gives [row, col] for 2D arrays.
-  // We want per-series arrays.
   const rows = vs.length;
   const cols = rows > 0 ? (Array.isArray(vs[0]) ? vs[0].length : 0) : 0;
   const isRowMajor = rows === t.length && cols === labels.length;
@@ -582,19 +728,49 @@ function toSpectrumPlot(spectrum: {
   frequencies: number[];
   magnitudes: number[][] | number[];
   labels: string[];
-}): PlotData {
+}, kind: PlotData["kind"] = "line"): PlotData {
   const freq = spectrum.frequencies ?? [];
   const mag = spectrum.magnitudes ?? [];
   const labels = spectrum.labels ?? [];
   const isMatrix = Array.isArray(mag[0]);
-  const series = isMatrix
-    ? labels.map((lbl, j) => ({ label: lbl, values: (mag as number[][]).map((r) => Number(r[j] ?? 0)) }))
-    : [{ label: labels[0] ?? "|H|", values: (mag as number[]).map((v) => Number(v)) }];
-  return { x: freq, series, xLabel: "f (Hz)", yLabel: "|H|", logX: true };
+  let series: { label: string; values: number[] }[];
+  if (isMatrix) {
+    const matrix = mag as number[][];
+    const rows = matrix.length;
+    const cols = rows > 0 && Array.isArray(matrix[0]) ? matrix[0].length : 0;
+    const labelRows = rows === labels.length && cols === freq.length;
+    const pointRows = rows === freq.length && cols === labels.length;
+    if (labelRows) {
+      series = labels.map((lbl, j) => ({
+        label: lbl,
+        values: (matrix[j] ?? []).map((v) => Number(v))
+      }));
+    } else if (pointRows) {
+      series = labels.map((lbl, j) => ({
+        label: lbl,
+        values: matrix.map((row) => Number(row[j] ?? 0))
+      }));
+    } else {
+      series = labels.map((lbl, j) => ({
+        label: lbl,
+        values: (matrix[j] ?? []).map((v) => Number(v))
+      }));
+    }
+  } else {
+    series = [{ label: labels[0] ?? "|H|", values: (mag as number[]).map((v) => Number(v)) }];
+  }
+  return {
+    x: freq,
+    series,
+    xLabel: "frequency (Hz)",
+    yLabel: "magnitude",
+    kind,
+    logX: kind === "line",
+    title: kind === "stem" ? "Harmonic magnitudes" : undefined
+  };
 }
 
 function opResultPlotData(labels: string[], values: number[]): PlotData {
-  // Render .op as a bar-chart-ish line sampling.
   const x = labels.map((_, i) => i);
   return {
     x,
@@ -603,4 +779,10 @@ function opResultPlotData(labels: string[], values: number[]): PlotData {
     yLabel: "V",
     title: labels.join("  ·  ")
   };
+}
+
+function formatCompact(value: number): string {
+  if (value >= 1e6) return `${(value / 1e6).toFixed(2).replace(/\.?0+$/, "")}M`;
+  if (value >= 1e3) return `${(value / 1e3).toFixed(2).replace(/\.?0+$/, "")}k`;
+  return value.toFixed(2).replace(/\.?0+$/, "");
 }

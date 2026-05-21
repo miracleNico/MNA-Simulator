@@ -178,7 +178,22 @@ class SchematicComponent(BaseModel):
     """Schematic component node sent from the frontend graph."""
 
     id: str
-    type: Literal["R", "C", "L", "V", "I", "D", "GND", "VCVS", "VCCS", "CCCS", "CCVS", "SUBCKT"]
+    type: Literal[
+        "R",
+        "C",
+        "L",
+        "V",
+        "I",
+        "D",
+        "GND",
+        "VCVS",
+        "VCCS",
+        "CCCS",
+        "CCVS",
+        "QNPN",
+        "QPNP",
+        "SUBCKT",
+    ]
     name: str | None = None
     value: str | None = None
     subtype: str | None = None
@@ -204,6 +219,8 @@ class SchematicComponent(BaseModel):
             "V": "1",
             "I": "1m",
             "D": "1e-15",
+            "QNPN": "40m",
+            "QPNP": "40m",
         }
         if self.type in defaults and (self.value is None or str(self.value).strip() == ""):
             self.value = defaults[self.type]

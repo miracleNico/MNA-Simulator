@@ -118,6 +118,37 @@ export function LeftPane(props: Props) {
   );
 }
 
+function parseMetric(raw: string): number {
+  if (!raw) return NaN;
+  const m = raw.trim().match(/^([-+]?[0-9]*\.?[0-9]+)([a-zA-Zµ]*)$/);
+  if (!m) return Number(raw);
+  const base = Number(m[1]);
+  const suf = (m[2] || "").toLowerCase();
+  const table: Record<string, number> = {
+    "": 1,
+    f: 1e-15,
+    p: 1e-12,
+    n: 1e-9,
+    u: 1e-6,
+    µ: 1e-6,
+    m: 1e-3,
+    k: 1e3,
+    meg: 1e6,
+    g: 1e9
+  };
+  return suf in table ? base * table[suf] : base;
+}
+
+function estimateWallDuration(tStop: string, dynSpeed: string): string {
+  const t = parseMetric(tStop);
+  const s = parseMetric(dynSpeed);
+  if (!isFinite(t) || !isFinite(s) || s <= 0) return "–";
+  const wall = t / s;
+  if (wall >= 60) return `${wall.toFixed(0)}`;
+  if (wall >= 1) return `${wall.toFixed(1)}`;
+  return `${wall.toFixed(2)}`;
+}
+
 function CollapsibleSection({
   title,
   defaultOpen,
@@ -160,8 +191,7 @@ function SimulationControls({
     { value: "op", label: ".op" },
     { value: "tran", label: ".tran" },
     { value: "ac", label: ".ac" },
-    { value: "hb", label: ".hb" },
-    { value: "dyn", label: ".dyn (live)" }
+    { value: "hb", label: ".hb" }
   ];
   return (
     <>
@@ -180,7 +210,7 @@ function SimulationControls({
         </select>
       </div>
 
-      {(analysis.mode === "tran" || analysis.mode === "dyn") && (
+      {analysis.mode === "tran" && (
         <>
           <div className="formRow">
             <label>t_stop</label>
@@ -232,20 +262,41 @@ function SimulationControls({
       )}
 
       {analysis.mode === "hb" && (
-        <div className="formRow">
-          <label>harmonics</label>
-          <input
-            className="input"
-            type="number"
-            value={analysis.harmonics}
-            onChange={(e) => onAnalysisChange({ harmonics: Number(e.target.value) })}
-          />
-        </div>
+        <>
+          <div className="formRow">
+            <label>harmonics</label>
+            <input
+              className="input"
+              type="number"
+              min={1}
+              value={analysis.harmonics}
+              onChange={(e) => onAnalysisChange({ harmonics: Number(e.target.value) })}
+            />
+          </div>
+          <div className="formRow">
+            <label>window</label>
+            <input
+              className="input"
+              value={analysis.hbTimeWindow}
+              onChange={(e) => onAnalysisChange({ hbTimeWindow: e.target.value })}
+              placeholder="spectrum"
+            />
+          </div>
+        </>
       )}
 
-      {analysis.mode === "dyn" && (
+      <div
+        style={{
+          marginTop: 10,
+          paddingTop: 10,
+          borderTop: "1px solid var(--border-subtle, rgba(255,255,255,0.08))"
+        }}
+      >
+        <div className="hintText" style={{ marginBottom: 6 }}>
+          Dynamic probe — click the probe icon, then click a pin.
+        </div>
         <div className="formRow">
-          <label title="Simulation seconds per real-time second. e.g. 1u = 1µs of sim per 1 s of wall time.">
+          <label title="Simulation seconds per real-time second. e.g. 1m = 1ms of sim per 1 s of wall time.">
             speed (s/s)
           </label>
           <input
@@ -254,9 +305,35 @@ function SimulationControls({
             onChange={(e) => onAnalysisChange({ dynSpeed: e.target.value })}
           />
         </div>
-      )}
+        <div className="formRow">
+          <label title="Sliding window of sim-time kept on screen. e.g. 5m = newest 5 ms of samples, older points are discarded so the plot doesn't accumulate.">
+            window
+          </label>
+          <input
+            className="input"
+            value={analysis.dynWindow}
+            onChange={(e) => onAnalysisChange({ dynWindow: e.target.value })}
+            placeholder="5m"
+          />
+        </div>
+        <div className="formRow">
+          <label title="When checked, the probe stream loops forever. When unchecked, it runs for tran duration ÷ speed wall-seconds.">
+            continuous
+          </label>
+          <input
+            type="checkbox"
+            checked={analysis.continuous}
+            onChange={(e) => onAnalysisChange({ continuous: e.target.checked })}
+          />
+        </div>
+        <div className="hintText" style={{ marginTop: 4 }}>
+          {analysis.continuous
+            ? `Infinite stream — only the most recent ${analysis.dynWindow}s of sim time is shown.`
+            : `Finite stream: t_stop ÷ speed ≈ ${estimateWallDuration(analysis.tStop, analysis.dynSpeed)} s wall.`}
+        </div>
+      </div>
 
-      {analysis.mode === "tran" && (
+      {(analysis.mode === "tran" || analysis.mode === "hb") && (
         <div className="formRow" style={{ flexDirection: "column", alignItems: "stretch" }}>
           <label style={{ marginBottom: 6 }}>Display nodes</label>
           <div style={{ display: "flex", flexWrap: "wrap" }}>
@@ -403,13 +480,17 @@ function LevelBranch({
         >
           +sub
         </span>
-        {level.parentId !== null ? (
+        {/* The single canonical root keeps the schematic anchored, but any
+            other level (top-level siblings created via "+ New top-level" or
+            nested children) is deletable. */}
+        {level.id !== "root" ? (
           <span
             className="treeItem__add"
             onClick={(e) => {
               e.stopPropagation();
               onDelete(level.id);
             }}
+            title="Delete this level (children are also removed)"
           >
             ×
           </span>

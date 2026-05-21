@@ -5,9 +5,26 @@ from __future__ import annotations
 import numpy as np
 
 from .api.contracts import AnalysisMode, AnalysisOptions, MnaProblem, SimulationResult, SpectrumResult, WaveformResult
+from .errors import error_handler
 from .mna_builder import build_mna_problem
 from .solvers import reconstruct_time_domain, solve_harmonic_balance
 from .utils import parse_value
+
+
+def find_gcd_frequency(frequencies: list[float], tolerance: float = 1e-5) -> float | None:
+    """Return the floating-point GCD used as the HB fundamental frequency."""
+
+    positive = sorted({freq for freq in frequencies if freq > tolerance})
+    if not positive:
+        return None
+
+    gcd_value = positive[0]
+    for freq in positive[1:]:
+        value = freq
+        while value > tolerance:
+            gcd_value, value = value, gcd_value % value
+
+    return gcd_value
 
 
 def run_advanced_analysis(problem: MnaProblem, options: AnalysisOptions) -> SimulationResult:
@@ -23,11 +40,20 @@ def run_advanced_analysis(problem: MnaProblem, options: AnalysisOptions) -> Simu
 
     source_frequencies = [freq for freq in source_frequencies if freq]
     if source_frequencies:
-        f0 = min(source_frequencies)
+        f0 = find_gcd_frequency(source_frequencies)
     else:
-        f0 = 1.0
+        error_handler("HB_ERROR: No sinusoidal sources found.")
+        raise RuntimeError("unreachable")
+
+    if f0 is None:
+        error_handler("HB_ERROR: Could not determine HB base frequency.")
+        raise RuntimeError("unreachable")
 
     harmonics = options.hb_harmonics or 8
+    min_harmonics_needed = int(np.ceil(max(source_frequencies) / f0))
+    if harmonics < min_harmonics_needed:
+        harmonics = min_harmonics_needed + 4
+
     omega_0 = 2 * np.pi * f0
     x_bar = solve_harmonic_balance(problem, omega_0=omega_0, H=harmonics, max_iter=options.max_iter, tol=options.f_tol)
 

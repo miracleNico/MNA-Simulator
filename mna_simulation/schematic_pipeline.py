@@ -30,9 +30,11 @@ PIN_LAYOUT: dict[str, tuple[str, ...]] = {
     "VCCS": ("p", "n", "cp", "cn"),
     "CCCS": ("p", "n"),
     "CCVS": ("p", "n"),
+    "QNPN": ("c", "b", "e"),
+    "QPNP": ("c", "b", "e"),
 }
 
-DEVICE_NAME_PATTERN = re.compile(r"^(R|C|L|V|I|D|E|G|F|H)\w*$", re.IGNORECASE)
+DEVICE_NAME_PATTERN = re.compile(r"^(R|C|L|V|I|D|E|G|F|H|Q)\w*$", re.IGNORECASE)
 
 
 @dataclass(slots=True)
@@ -151,7 +153,7 @@ def _build_analysis_line(
 
 
 def _auto_name(component: SchematicComponent, counters: dict[str, int], used_names: set[str]) -> str:
-    prefix = component.type
+    prefix = "Q" if component.type in {"QNPN", "QPNP"} else component.type
     if prefix == "GND":
         return component.name or component.id
 
@@ -181,6 +183,13 @@ def _build_component_line(
     if component.type == "D":
         value = component.value or "1e-15"
         return f"{name} {node1} {node2} {value}"
+    if component.type in {"QNPN", "QPNP"}:
+        collector = nodes.get("c", "")
+        base = nodes.get("b", "")
+        emitter = nodes.get("e", "")
+        gm = component.value or "40m"
+        r_pi = component.value2 or "2.5k"
+        return f"{name} {collector} {base} {emitter} {component.type} {gm} {r_pi}"
     if component.type == "VCVS":
         cp = nodes.get("cp", component.ctrl_node1 or "0")
         cn = nodes.get("cn", component.ctrl_node2 or "0")
@@ -233,6 +242,74 @@ def _collect_pin_keys(components: Iterable[SchematicComponent]) -> set[str]:
         for pin in _expected_pins(component.type, component):
             pin_keys.add(f"cp:{component.id}:{pin}")
     return pin_keys
+
+
+def _top_level_net_name_hints(schematic: SchematicDocument) -> dict[str, str]:
+    """Return flattened endpoint keys that should keep root-canvas n-labels."""
+
+    component_lookup = {component.id: component for component in schematic.components}
+    junction_ids = {junction.id for junction in schematic.junctions}
+    union_find = _UnionFind()
+    ordered_keys: list[str] = []
+
+    def add_key(key: str) -> None:
+        union_find.add(key)
+        if key not in ordered_keys:
+            ordered_keys.append(key)
+
+    for component in schematic.components:
+        for pin in _expected_pins(component.type, component):
+            add_key(f"cp:{component.id}:{pin}")
+    for junction_id in junction_ids:
+        add_key(f"jn:{junction_id}")
+
+    connected_pin_keys: set[str] = set()
+    for wire in schematic.wires:
+        _ensure_endpoint_valid(wire.start, component_lookup, junction_ids)
+        _ensure_endpoint_valid(wire.end, component_lookup, junction_ids)
+        left_key = _endpoint_key(wire.start)
+        right_key = _endpoint_key(wire.end)
+        add_key(left_key)
+        add_key(right_key)
+        union_find.union(left_key, right_key)
+        if left_key.startswith("cp:"):
+            connected_pin_keys.add(left_key)
+        if right_key.startswith("cp:"):
+            connected_pin_keys.add(right_key)
+
+    ground_roots: set[str] = set()
+    for component in schematic.components:
+        if component.type == "GND":
+            ground_key = f"cp:{component.id}:g"
+            if ground_key in connected_pin_keys:
+                ground_roots.add(union_find.find(ground_key))
+
+    root_to_name: dict[str, str] = {}
+    counter = 1
+    for key in ordered_keys:
+        root = union_find.find(key)
+        if root in root_to_name or root in ground_roots:
+            continue
+        root_to_name[root] = f"n{counter}"
+        counter += 1
+
+    hints: dict[str, str] = {}
+    for key in ordered_keys:
+        root = union_find.find(key)
+        name = root_to_name.get(root)
+        if not name:
+            continue
+        if key.startswith("cp:"):
+            _, component_id, pin = key.split(":", 2)
+            component = component_lookup.get(component_id)
+            if component and component.type == "SUBCKT":
+                hints[f"jn:{component.id}$port_{pin}"] = name
+            else:
+                hints[key] = name
+        else:
+            hints[key] = name
+
+    return hints
 
 
 def _flatten_subcircuits(
@@ -415,6 +492,9 @@ def schematic_to_netlist(
 ) -> tuple[str, dict[str, str]]:
     """Convert schematic graph data into canonical netlist text."""
 
+    has_hierarchy = any(component.type == "SUBCKT" for component in schematic.components)
+    net_name_hints = _top_level_net_name_hints(schematic) if has_hierarchy else {}
+
     # Recursively inline subcircuits before running net formation.
     schematic = _flatten_subcircuits(schematic)
 
@@ -454,15 +534,32 @@ def schematic_to_netlist(
         error_handler("NETLIST_FATAL: Schematic requires at least one connected GND symbol.")
 
     root_to_net: dict[str, str] = {}
+    used_net_names: set[str] = set()
+    for key, net_name in net_name_hints.items():
+        if key not in union_find.parent:
+            continue
+        root = union_find.find(key)
+        if root in ground_roots or root in root_to_net:
+            continue
+        root_to_net[root] = net_name
+        used_net_names.add(net_name)
+
     net_counter = 1
+    internal_counter = 1
     for key in pin_keys:
         root = union_find.find(key)
         if root in root_to_net:
             continue
         if root in ground_roots:
             root_to_net[root] = "0"
+        elif has_hierarchy:
+            root_to_net[root] = f"x{internal_counter}"
+            internal_counter += 1
         else:
+            while f"n{net_counter}" in used_net_names:
+                net_counter += 1
             root_to_net[root] = f"n{net_counter}"
+            used_net_names.add(root_to_net[root])
             net_counter += 1
 
     pin_to_node: dict[str, str] = {}
