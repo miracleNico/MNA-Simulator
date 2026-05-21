@@ -242,10 +242,14 @@ export function SchematicCanvas(props: Props) {
     // 2) Pin click → start wiring (or probe).
     const pin = findPinAt(wx, wy);
     if (pin) {
+      const pinComponent = componentsById.get(pin.componentId);
+      if (!props.probeMode && pinComponent?.type === "NODE") {
+        selectAndStartMove(pinComponent, wx, wy, e.shiftKey);
+        return;
+      }
       if (props.probeMode) {
-        const c = componentsById.get(pin.componentId);
-        if (c) {
-          const p = getPinCoordinates(c, pin.pin);
+        if (pinComponent) {
+          const p = getPinCoordinates(pinComponent, pin.pin);
           props.onProbePick({
             componentId: pin.componentId,
             pin: pin.pin,
@@ -280,32 +284,7 @@ export function SchematicCanvas(props: Props) {
     // 4) Component click → select / start move.
     const hit = findComponentAt(wx, wy);
     if (hit) {
-      const additive = e.shiftKey;
-      const alreadySelected = props.selectedIds.has(hit.id);
-      let nextSel: Set<string>;
-      if (additive) {
-        nextSel = new Set(props.selectedIds);
-        if (alreadySelected) nextSel.delete(hit.id);
-        else nextSel.add(hit.id);
-      } else if (alreadySelected) {
-        nextSel = new Set(props.selectedIds);
-      } else {
-        nextSel = new Set([hit.id]);
-      }
-      props.onSelect(nextSel);
-      // Build origin map for selected components so we can drag the group.
-      const origin = new Map<string, { x: number; y: number }>();
-      for (const id of nextSel) {
-        const cc = componentsById.get(id);
-        if (cc) origin.set(id, { x: cc.x, y: cc.y });
-      }
-      setInteraction({
-        kind: "moving",
-        ids: Array.from(nextSel),
-        anchorWX: wx,
-        anchorWY: wy,
-        origin
-      });
+      selectAndStartMove(hit, wx, wy, e.shiftKey);
       return;
     }
 
@@ -321,6 +300,34 @@ export function SchematicCanvas(props: Props) {
       setSelection([]);
     }
     setInteraction({ kind: "marquee", startWX: wx, startWY: wy, cursorWX: wx, cursorWY: wy });
+  }
+
+  function selectAndStartMove(hit: CanvasComponent, wx: number, wy: number, additive: boolean): void {
+    const alreadySelected = props.selectedIds.has(hit.id);
+    let nextSel: Set<string>;
+    if (additive) {
+      nextSel = new Set(props.selectedIds);
+      if (alreadySelected) nextSel.delete(hit.id);
+      else nextSel.add(hit.id);
+    } else if (alreadySelected) {
+      nextSel = new Set(props.selectedIds);
+    } else {
+      nextSel = new Set([hit.id]);
+    }
+    props.onSelect(nextSel);
+    // Build origin map for selected components so we can drag the group.
+    const origin = new Map<string, { x: number; y: number }>();
+    for (const id of nextSel) {
+      const cc = componentsById.get(id);
+      if (cc) origin.set(id, { x: cc.x, y: cc.y });
+    }
+    setInteraction({
+      kind: "moving",
+      ids: Array.from(nextSel),
+      anchorWX: wx,
+      anchorWY: wy,
+      origin
+    });
   }
 
   function onMouseMove(e: React.MouseEvent<HTMLCanvasElement>) {
@@ -612,14 +619,16 @@ export function SchematicCanvas(props: Props) {
       drawComponent(ctx, c, DEFAULT_THEME);
       // Name label
       const b = componentBounds(c);
-      ctx.fillStyle = DEFAULT_THEME.label;
-      ctx.font = "500 11px Inter, system-ui, sans-serif";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "top";
-      ctx.fillText(c.name, c.x, b.y + b.h + 4);
-      if (c.type !== "GND") {
-        ctx.fillStyle = DEFAULT_THEME.muted;
-        ctx.fillText(c.value, c.x, b.y + b.h + 18);
+      if (c.type !== "LABEL" && c.type !== "NODE") {
+        ctx.fillStyle = DEFAULT_THEME.label;
+        ctx.font = "500 11px Inter, system-ui, sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "top";
+        ctx.fillText(c.name, c.x, b.y + b.h + 4);
+        if (c.type !== "GND") {
+          ctx.fillStyle = DEFAULT_THEME.muted;
+          ctx.fillText(c.value, c.x, b.y + b.h + 18);
+        }
       }
       if (props.selectedIds.has(c.id)) {
         ctx.save();

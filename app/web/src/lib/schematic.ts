@@ -22,6 +22,8 @@ export type DeviceType =
   | "QPNP"
   | "NMOS"
   | "PMOS"
+  | "LABEL"
+  | "NODE"
   | "SUBCKT";
 
 export type BasicAnalysisMode = "op" | "tran" | "ac" | "hb" | "dyn";
@@ -41,6 +43,7 @@ export type CanvasComponent = {
   ctrlSource?: string;
   subcircuitId?: string;
   pins?: string[];
+  metadata?: Record<string, string>;
   x: number;
   y: number;
   rotation: Rotation;
@@ -163,6 +166,8 @@ export const DEVICE_PIN_OFFSETS: Record<DeviceType, Record<string, PinOffset>> =
     g: { dx: -COMPONENT_BOX / 2, dy: 0 },
     s: { dx: 0, dy: -COMPONENT_BOX / 2 }
   },
+  LABEL: {},
+  NODE: { n: { dx: 0, dy: 0 } },
   SUBCKT: {}
 };
 
@@ -182,6 +187,8 @@ const DEFAULT_VALUES: Record<DeviceType, string> = {
   QPNP: "40m",
   NMOS: "5m",
   PMOS: "5m",
+  LABEL: "node",
+  NODE: "node",
   SUBCKT: "1"
 };
 
@@ -201,6 +208,8 @@ export const DEVICE_LABELS: Record<DeviceType, string> = {
   QPNP: "BJT (PNP)",
   NMOS: "NMOS",
   PMOS: "PMOS",
+  LABEL: "Label",
+  NODE: "Node",
   SUBCKT: "Subckt"
 };
 
@@ -261,9 +270,34 @@ export function getPinCoordinates(component: CanvasComponent, pin: string): { x:
   return { x: component.x + rotated.dx, y: component.y + rotated.dy };
 }
 
+function resolveComponentPin(component: CanvasComponent, pin: string): string {
+  const pins = getPinsForType(component.type, component);
+  if (pins.includes(pin)) return pin;
+  if (component.type !== "SUBCKT") return pin;
+
+  const cleaned = normalizeNodeName(pin);
+  const exactNormalized = pins.find((candidate) => normalizeNodeName(candidate) === cleaned);
+  if (exactNormalized) return exactNormalized;
+
+  const trimmed = cleaned.replace(/_+$/, "");
+  if (!trimmed) return pin;
+  return (
+    pins.find((candidate) => {
+      const normalized = normalizeNodeName(candidate);
+      return normalized === trimmed || normalized.startsWith(trimmed) || cleaned.startsWith(normalized);
+    }) ?? pin
+  );
+}
+
 export function componentBounds(component: CanvasComponent): { x: number; y: number; w: number; h: number } {
   if (component.type === "GND") {
     return { x: component.x - GND_BOX / 2, y: component.y - GND_BOX / 2, w: GND_BOX, h: GND_BOX };
+  }
+  if (component.type === "LABEL") {
+    return { x: component.x - 38, y: component.y - 12, w: 76, h: 24 };
+  }
+  if (component.type === "NODE") {
+    return { x: component.x - 28, y: component.y - 18, w: 56, h: 36 };
   }
   if (component.type === "SUBCKT") {
     return {
@@ -286,6 +320,8 @@ export function createDefaultComponent(
     type === "GND" ? "GND" :
     type === "QNPN" || type === "QPNP" ? "Q" :
     type === "NMOS" || type === "PMOS" ? "M" :
+    type === "LABEL" ? "label" :
+    type === "NODE" ? "node" :
     type;
   return {
     id: `${type.toLowerCase()}-${index}-${Math.random().toString(36).slice(2, 7)}`,
@@ -293,6 +329,22 @@ export function createDefaultComponent(
     name: `${namePrefix}${index}`,
     value: DEFAULT_VALUES[type],
     subtype: type === "V" || type === "I" ? "DC" : undefined,
+    value2:
+      type === "QNPN" || type === "QPNP" ? "2.5k" :
+      type === "NMOS" || type === "PMOS" ? "50k" :
+      undefined,
+    value3:
+      type === "QNPN" || type === "QPNP" ? "100k" :
+      type === "NMOS" || type === "PMOS" ? "5p" :
+      undefined,
+    metadata:
+      type === "QNPN" || type === "QPNP"
+        ? { cpi: "8p", cmu: "3p", ccs: "0", rb: "0", re: "0" }
+        : type === "NMOS" || type === "PMOS"
+          ? { cgd: "1p", gmb: "0", cbs: "0", cbd: "0" }
+          : undefined,
+    pins: type === "SUBCKT" ? ["in_1", "out_1"] : undefined,
+    subcircuitId: type === "SUBCKT" ? "" : undefined,
     x: snap(x),
     y: snap(y),
     rotation: 0
@@ -394,6 +446,15 @@ export function computeNetAssignments(
       allKeys.push(k);
     }
   }
+  const nodeRoots = new Map<string, string>();
+  for (const c of components) {
+    if (c.type !== "NODE") continue;
+    const k = pinKey(c.id, "n");
+    const nodeName = normalizeNodeName(c.name || c.value || c.id);
+    const first = nodeRoots.get(nodeName);
+    if (first) uf.union(first, k);
+    else nodeRoots.set(nodeName, k);
+  }
   // Seed wire endpoints (free points get their own keys) and union the pair.
   for (const w of wires) {
     const a = epKey(w.start);
@@ -416,6 +477,11 @@ export function computeNetAssignments(
   }
 
   const rootToNet = new Map<string, string>();
+  for (const c of components) {
+    if (c.type !== "NODE") continue;
+    const r = uf.find(pinKey(c.id, "n"));
+    if (!rootToNet.has(r)) rootToNet.set(r, normalizeNodeName(c.name || c.value || c.id));
+  }
   let counter = 1;
   for (const k of allKeys) {
     const r = uf.find(k);
@@ -436,11 +502,19 @@ export function computeNetAssignments(
   return { byKey, byWire };
 }
 
+export function normalizeNodeName(raw: string): string {
+  const cleaned = (raw || "node")
+    .trim()
+    .replace(/^port_/i, "")
+    .replace(/[^A-Za-z0-9_]/g, "_");
+  return cleaned || "node";
+}
+
 /* ---- Transistor small-signal expansion -------------------------------- */
 
 type ExpandedComponent = {
   id: string;
-  type: Exclude<DeviceType, "NMOS" | "PMOS">;
+  type: DeviceType;
   name: string;
   value: string | null;
   subtype: string | null;
@@ -452,6 +526,7 @@ type ExpandedComponent = {
   subcircuit_id: string | null;
   pins: string[] | null;
   position: { x: number; y: number };
+  metadata: Record<string, string>;
 };
 
 type ExpandedWire = {
@@ -485,6 +560,9 @@ function expandSchematic(
   function ensureJunction(id: string, x: number, y: number): void {
     if (!junctionMap.has(id)) junctionMap.set(id, { id, position: { x, y } });
   }
+  function nodeJunctionId(name: string): string {
+    return `port_${normalizeNodeName(name)}`;
+  }
 
   // Pre-register named junctions (e.g. ``port_in``) so any wire whose point
   // endpoint sits on top of one resolves to that explicit name rather than an
@@ -502,74 +580,22 @@ function expandSchematic(
     return `${componentId}:${pin}`;
   }
 
-  // 1. Pass through ordinary components verbatim. BJTs are now backend-owned
-  // devices, so only MOSFET placeholders are expanded on the client.
+  // 1. Pass through components verbatim. Transistor small-signal models are
+  // backend-owned so AC parasitics and ro are stamped consistently.
   for (const c of components) {
-    if (c.type === "NMOS" || c.type === "PMOS") {
+    if (c.type === "LABEL") continue;
+    if (c.type === "NODE") {
+      const pos = getPinCoordinates(c, "n");
+      const jid = nodeJunctionId(c.name || c.value || c.id);
+      ensureJunction(jid, pos.x, pos.y);
+      pinRewrite.set(pinSlotKey(c.id, "n"), { kind: "junction", junction_id: jid });
       continue;
     }
     outComponents.push(serializeBasicComponent(c));
   }
 
-  // 2. Replace each MOSFET with its small-signal equivalent.
-  for (const c of components) {
-    if (c.type !== "NMOS" && c.type !== "PMOS") continue;
-    const pinNames = ["d", "g", "s"];
-    // For each transistor pin create a junction.
-    const pinJ: Record<string, string> = {};
-    for (const pin of pinNames) {
-      const pos = getPinCoordinates(c, pin);
-      const jid = `j_${c.id}_${pin}`;
-      ensureJunction(jid, pos.x, pos.y);
-      pinJ[pin] = jid;
-      pinRewrite.set(pinSlotKey(c.id, pin), { kind: "junction", junction_id: jid });
-    }
-
-    // MOSFET small-signal: VCCS only (gate has no DC current path)
-    const dJ = pinJ.d;
-    const gJ = pinJ.g;
-    const sJ = pinJ.s;
-    const gm = c.value || "5m";
-    const vccsId = `_${c.id}_gm`;
-    outComponents.push({
-      id: vccsId,
-      type: "VCCS",
-      name: `G${c.name}`,
-      value: gm,
-      subtype: null,
-      value2: null,
-      value3: null,
-      ctrl_node1: null,
-      ctrl_node2: null,
-      ctrl_source: null,
-      subcircuit_id: null,
-      pins: null,
-      position: { x: c.x, y: c.y }
-    });
-    outWires.push({
-      id: `_${c.id}_w_p`,
-      start: { kind: "component_pin", component_id: vccsId, pin: "p" },
-      end: { kind: "junction", junction_id: dJ }
-    });
-    outWires.push({
-      id: `_${c.id}_w_n`,
-      start: { kind: "component_pin", component_id: vccsId, pin: "n" },
-      end: { kind: "junction", junction_id: sJ }
-    });
-    outWires.push({
-      id: `_${c.id}_w_cp`,
-      start: { kind: "component_pin", component_id: vccsId, pin: "cp" },
-      end: { kind: "junction", junction_id: gJ }
-    });
-    outWires.push({
-      id: `_${c.id}_w_cn`,
-      start: { kind: "component_pin", component_id: vccsId, pin: "cn" },
-      end: { kind: "junction", junction_id: sJ }
-    });
-  }
-
-  // 3. Translate user wires; rewrite transistor-pin endpoints into the synthetic junctions, and free
-  //    point endpoints into shared coordinate-keyed junctions.
+  // 2. Translate user wires; rewrite marker endpoints into named junctions,
+  //    and free point endpoints into shared coordinate-keyed junctions.
   const pointJunctionByKey = new Map<string, string>();
   function pointJunctionId(x: number, y: number): string {
     const sx = snap(x);
@@ -592,8 +618,9 @@ function expandSchematic(
     }
     const rewrite = pinRewrite.get(`${ep.componentId}:${ep.pin}`);
     if (rewrite) return rewrite;
-    if (!componentsById.has(ep.componentId)) return null;
-    return { kind: "component_pin", component_id: ep.componentId, pin: ep.pin };
+    const component = componentsById.get(ep.componentId);
+    if (!component) return null;
+    return { kind: "component_pin", component_id: ep.componentId, pin: resolveComponentPin(component, ep.pin) };
   }
 
   for (const w of wires) {
@@ -624,7 +651,8 @@ function serializeBasicComponent(c: CanvasComponent): ExpandedComponent {
     ctrl_source: c.ctrlSource ?? null,
     subcircuit_id: c.subcircuitId ?? null,
     pins: c.pins ?? null,
-    position: { x: c.x, y: c.y }
+    position: { x: c.x, y: c.y },
+    metadata: c.metadata ?? {}
   };
 }
 
@@ -632,7 +660,8 @@ export function buildSchematicPayload(
   components: CanvasComponent[],
   wires: CanvasWire[],
   analysis: AnalysisState,
-  levels: SchematicLevel[] = []
+  levels: SchematicLevel[] = [],
+  rootJunctions: LevelJunction[] = []
 ): Record<string, unknown> {
   const analysisParams: Record<string, unknown> = {};
   if (analysis.mode === "tran" || analysis.mode === "dyn") {
@@ -655,7 +684,11 @@ export function buildSchematicPayload(
   // Pass the active level's own named junctions (if any) so SUBCKT instances
   // at the root level can also use port-style junction names if desired.
   const rootLevel = levels.find((l) => l.parentId === null);
-  const expanded = expandSchematic(components, wires, rootLevel?.junctions ?? []);
+  const expanded = expandSchematic(
+    components,
+    wires,
+    rootJunctions.length > 0 ? rootJunctions : rootLevel?.junctions ?? []
+  );
 
   const subcircuits: Record<string, unknown> = {};
   for (const level of levels) {

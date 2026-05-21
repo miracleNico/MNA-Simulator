@@ -14,6 +14,7 @@ type Props = {
 const REGULAR: DeviceType[] = ["R", "C", "L", "V", "I", "D", "GND"];
 const TRANSISTORS: DeviceType[] = ["QNPN", "QPNP", "NMOS", "PMOS"];
 const CONTROLLED: DeviceType[] = ["VCVS", "VCCS", "CCCS", "CCVS"];
+const ANNOTATION: DeviceType[] = ["LABEL", "NODE"];
 
 export function Toolbar(props: Props) {
   return (
@@ -58,6 +59,17 @@ export function Toolbar(props: Props) {
           active={props.pendingDevice === "SUBCKT"}
           onClick={() => props.onPickDevice(props.pendingDevice === "SUBCKT" ? null : "SUBCKT")}
         />
+      </div>
+      <div className="toolGroup">
+        <span className="toolGroup__label">Nodes</span>
+        {ANNOTATION.map((t) => (
+          <DeviceButton
+            key={t}
+            type={t}
+            active={props.pendingDevice === t}
+            onClick={() => props.onPickDevice(props.pendingDevice === t ? null : t)}
+          />
+        ))}
       </div>
       <div style={{ flex: 1 }} />
       <div className="toolGroup">

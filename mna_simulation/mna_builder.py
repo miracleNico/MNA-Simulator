@@ -157,6 +157,18 @@ def build_mna_problem(circuit: CircuitIR, gmin: float = 0.0) -> MnaProblem:
             G[k, kv] -= 1
             G[kv, k] -= 1
 
+    def stamp_vccs_matrix(matrix: np.ndarray, out_p: int, out_n: int, ctrl_p: int, ctrl_n: int, gain: float) -> None:
+        if gain == 0.0:
+            return
+        if out_p != -1 and ctrl_p != -1:
+            matrix[out_p, ctrl_p] += gain
+        if out_p != -1 and ctrl_n != -1:
+            matrix[out_p, ctrl_n] -= gain
+        if out_n != -1 and ctrl_p != -1:
+            matrix[out_n, ctrl_p] -= gain
+        if out_n != -1 and ctrl_n != -1:
+            matrix[out_n, ctrl_n] += gain
+
     for component in components:
         comp_type = component.type
         j = get_index(component.node1)
@@ -215,14 +227,7 @@ def build_mna_problem(circuit: CircuitIR, gmin: float = 0.0) -> MnaProblem:
             c1 = get_index(component.ctrl_node1)
             c2 = get_index(component.ctrl_node2)
             gain = parse_value(component.value or "0")
-            if j != -1 and c1 != -1:
-                G[j, c1] += gain
-            if j != -1 and c2 != -1:
-                G[j, c2] -= gain
-            if k != -1 and c1 != -1:
-                G[k, c1] -= gain
-            if k != -1 and c2 != -1:
-                G[k, c2] += gain
+            stamp_vccs_matrix(G, j, k, c1, c2, gain)
         elif comp_type == "VCVS":
             branch_idx = get_branch_index(component.name)
             c1 = get_index(component.ctrl_node1)
@@ -265,16 +270,46 @@ def build_mna_problem(circuit: CircuitIR, gmin: float = 0.0) -> MnaProblem:
             collector = j
             gm = parse_value(component.value or "40m")
             r_pi = parse_value(component.value2 or "2.5k")
+            r_o = parse_value(component.value3 or "100k")
+            c_pi = parse_value(component.metadata.get("cpi", "8p"))
+            c_mu = parse_value(component.metadata.get("cmu", "3p"))
+            c_cs = parse_value(component.metadata.get("ccs", "0"))
             stamp(G, base, emitter, 1.0 / r_pi)
+            if r_o > 0.0:
+                stamp(G, collector, emitter, 1.0 / r_o)
+            if c_pi > 0.0:
+                stamp(C, base, emitter, c_pi)
+            if c_mu > 0.0:
+                stamp(C, base, collector, c_mu)
+            if c_cs > 0.0:
+                stamp(C, collector, emitter, c_cs)
             # Hybrid-pi transconductance: gm * Vbe flowing collector -> emitter.
-            if collector != -1 and base != -1:
-                G[collector, base] += gm
-            if collector != -1 and emitter != -1:
-                G[collector, emitter] -= gm
-            if emitter != -1 and base != -1:
-                G[emitter, base] -= gm
-            if emitter != -1:
-                G[emitter, emitter] += gm
+            stamp_vccs_matrix(G, collector, emitter, base, emitter, gm)
+        elif comp_type in {"NMOS", "PMOS"}:
+            gate = get_index(component.ctrl_node1)
+            source = k
+            drain = j
+            gm = parse_value(component.value or "5m")
+            r_o = parse_value(component.value2 or "50k")
+            c_gs = parse_value(component.value3 or "5p")
+            c_gd = parse_value(component.metadata.get("cgd", "1p"))
+            g_mb = parse_value(component.metadata.get("gmb", "0"))
+            c_bs = parse_value(component.metadata.get("cbs", "0"))
+            c_bd = parse_value(component.metadata.get("cbd", "0"))
+            if r_o > 0.0:
+                stamp(G, drain, source, 1.0 / r_o)
+            if c_gs > 0.0:
+                stamp(C, gate, source, c_gs)
+            if c_gd > 0.0:
+                stamp(C, gate, drain, c_gd)
+            if c_bs > 0.0:
+                stamp(C, source, -1, c_bs)
+            if c_bd > 0.0:
+                stamp(C, drain, -1, c_bd)
+            stamp_vccs_matrix(G, drain, source, gate, source, gm)
+            # Body is implicit ground for the current three-pin symbol. gmb is
+            # present for richer models but defaults to zero.
+            stamp_vccs_matrix(G, drain, source, -1, source, g_mb)
         elif comp_type == "B":
             expression = component.value or "0"
             if j != -1:

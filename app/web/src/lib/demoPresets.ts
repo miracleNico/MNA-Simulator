@@ -97,9 +97,8 @@ const ceAmplifier: SchematicPreset = (() => {
 /* 3-stage op-amp using the SUBCKT mechanism.                              */
 /*                                                                          */
 /* Top level shows three SUBCKT rectangles (DiffAmp, MidStage, OutStage)   */
-/* wired in cascade. Each sub-level holds the actual gain block tied to    */
-/* ``port_<pin>`` junctions, and the backend's _flatten_subcircuits pass   */
-/* stitches outer SUBCKT pins to those inner ports at simulate time.       */
+/* wired in cascade. Each sub-level holds editable NODE markers whose      */
+/* names become ``port_<pin>`` junctions for the backend flattener.        */
 /* ----------------------------------------------------------------------- */
 
 const threeStageOpamp: SchematicPreset = (() => {
@@ -124,12 +123,10 @@ const threeStageOpamp: SchematicPreset = (() => {
       title: "Differential amp",
       parentId: "root",
       pins: ["in_p", "out", "in_n"],
-      junctions: [
-        { id: "port_in_p", x: 80, y: 240 },
-        { id: "port_in_n", x: 80, y: 320 },
-        { id: "port_out", x: 620, y: 180 }
-      ],
       components: [
+        mk({ id: `${prefix}-port-inp`, type: "NODE", name: "in_p", value: "node", x: 80, y: 240 }),
+        mk({ id: `${prefix}-port-inn`, type: "NODE", name: "in_n", value: "node", x: 80, y: 320 }),
+        mk({ id: `${prefix}-port-out`, type: "NODE", name: "out", value: "node", x: 620, y: 180 }),
         mk({ id: `${prefix}-q1`, type: "QNPN", name: "Q1", value: "2m", value2: "20k", x: 280, y: 240 }),
         mk({ id: `${prefix}-q2`, type: "QNPN", name: "Q2", value: "2m", value2: "20k", x: 440, y: 240 }),
         mk({ id: `${prefix}-rc1`, type: "R", name: "Rc1", value: "6.2k", x: 280, y: 100, rotation: 90 }),
@@ -140,8 +137,8 @@ const threeStageOpamp: SchematicPreset = (() => {
         mk({ id: `${prefix}-gnd-tail`, type: "GND", name: "GNDt", value: "0", x: 360, y: 372 })
       ],
       wires: [
-        { id: `${prefix}-w-inp`, start: pinEndpoint(`${prefix}-q1`, "b"), end: pointEndpoint(80, 240) },
-        { id: `${prefix}-w-inn`, start: pinEndpoint(`${prefix}-q2`, "b"), end: pointEndpoint(80, 320) },
+        pinWire(`${prefix}-w-inp`, `${prefix}-q1`, "b", `${prefix}-port-inp`, "n"),
+        pinWire(`${prefix}-w-inn`, `${prefix}-q2`, "b", `${prefix}-port-inn`, "n"),
         pinWire(`${prefix}-w-c1`, `${prefix}-q1`, "c", `${prefix}-rc1`, "n"),
         pinWire(`${prefix}-w-c2`, `${prefix}-q2`, "c", `${prefix}-rc2`, "n"),
         pinWire(`${prefix}-w-rc1-g`, `${prefix}-rc1`, "p", `${prefix}-gnd-c1`, "g"),
@@ -150,7 +147,7 @@ const threeStageOpamp: SchematicPreset = (() => {
         { id: `${prefix}-w-e2`, start: pinEndpoint(`${prefix}-q2`, "e"), end: pointEndpoint(360, 276) },
         { id: `${prefix}-w-tail`, start: pinEndpoint(`${prefix}-tail`, "p"), end: pointEndpoint(360, 276) },
         pinWire(`${prefix}-w-tail-g`, `${prefix}-tail`, "n", `${prefix}-gnd-tail`, "g"),
-        { id: `${prefix}-w-out`, start: pinEndpoint(`${prefix}-q2`, "c"), end: pointEndpoint(620, 180) }
+        pinWire(`${prefix}-w-out`, `${prefix}-q2`, "c", `${prefix}-port-out`, "n")
       ]
     };
   }
@@ -162,22 +159,20 @@ const threeStageOpamp: SchematicPreset = (() => {
       title: "CE gain stage",
       parentId: "root",
       pins: ["in", "out"],
-      junctions: [
-        { id: "port_in", x: 80, y: 240 },
-        { id: "port_out", x: 560, y: 180 }
-      ],
       components: [
+        mk({ id: `${prefix}-port-in`, type: "NODE", name: "in", value: "node", x: 80, y: 240 }),
+        mk({ id: `${prefix}-port-out`, type: "NODE", name: "out", value: "node", x: 560, y: 180 }),
         mk({ id: `${prefix}-q1`, type: "QNPN", name: "Q1", value: "3m", value2: "12k", x: 300, y: 240 }),
         mk({ id: `${prefix}-rc`, type: "R", name: "Rc", value: "5.6k", x: 300, y: 100, rotation: 90 }),
         mk({ id: `${prefix}-gnd-c`, type: "GND", name: "GNDc", value: "0", x: 300, y: 20 }),
         mk({ id: `${prefix}-gnd-e`, type: "GND", name: "GNDe", value: "0", x: 300, y: 360 })
       ],
       wires: [
-        { id: `${prefix}-w-in`, start: pinEndpoint(`${prefix}-q1`, "b"), end: pointEndpoint(80, 240) },
+        pinWire(`${prefix}-w-in`, `${prefix}-q1`, "b", `${prefix}-port-in`, "n"),
         pinWire(`${prefix}-w-c`, `${prefix}-q1`, "c", `${prefix}-rc`, "n"),
         pinWire(`${prefix}-w-rc-g`, `${prefix}-rc`, "p", `${prefix}-gnd-c`, "g"),
         pinWire(`${prefix}-w-e-g`, `${prefix}-q1`, "e", `${prefix}-gnd-e`, "g"),
-        { id: `${prefix}-w-out`, start: pinEndpoint(`${prefix}-q1`, "c"), end: pointEndpoint(560, 180) }
+        pinWire(`${prefix}-w-out`, `${prefix}-q1`, "c", `${prefix}-port-out`, "n")
       ]
     };
   }
@@ -189,22 +184,20 @@ const threeStageOpamp: SchematicPreset = (() => {
       title: "Emitter follower",
       parentId: "root",
       pins: ["in", "out"],
-      junctions: [
-        { id: "port_in", x: 80, y: 220 },
-        { id: "port_out", x: 560, y: 300 }
-      ],
       components: [
+        mk({ id: `${prefix}-port-in`, type: "NODE", name: "in", value: "node", x: 80, y: 220 }),
+        mk({ id: `${prefix}-port-out`, type: "NODE", name: "out", value: "node", x: 560, y: 300 }),
         mk({ id: `${prefix}-q1`, type: "QNPN", name: "Q1", value: "8m", value2: "6k", x: 300, y: 220 }),
         mk({ id: `${prefix}-re`, type: "R", name: "Re", value: "1k", x: 300, y: 400, rotation: 90 }),
         mk({ id: `${prefix}-gnd-c`, type: "GND", name: "GNDc", value: "0", x: 300, y: 100 }),
         mk({ id: `${prefix}-gnd-e`, type: "GND", name: "GNDe", value: "0", x: 300, y: 500 })
       ],
       wires: [
-        { id: `${prefix}-w-in`, start: pinEndpoint(`${prefix}-q1`, "b"), end: pointEndpoint(80, 220) },
+        pinWire(`${prefix}-w-in`, `${prefix}-q1`, "b", `${prefix}-port-in`, "n"),
         pinWire(`${prefix}-w-c-g`, `${prefix}-q1`, "c", `${prefix}-gnd-c`, "g"),
         pinWire(`${prefix}-w-e`, `${prefix}-q1`, "e", `${prefix}-re`, "p"),
         pinWire(`${prefix}-w-re-g`, `${prefix}-re`, "n", `${prefix}-gnd-e`, "g"),
-        { id: `${prefix}-w-out`, start: pinEndpoint(`${prefix}-q1`, "e"), end: pointEndpoint(560, 300) }
+        pinWire(`${prefix}-w-out`, `${prefix}-q1`, "e", `${prefix}-port-out`, "n")
       ]
     };
   }

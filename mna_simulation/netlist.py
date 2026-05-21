@@ -35,10 +35,10 @@ class Component:
     # Recognized type prefixes.
     # Order matters for `get_type` — list multi-letter prefixes (VCVS, etc.) before
     # their single-letter aliases so we don't classify "VCVS1" as a "V" source.
-    TYPE = r"(QNPN|QPNP|VCVS|VCCS|CCVS|CCCS|GND|R|C|V|L|I|E|F|G|H|D|B|Q|M)"
+    TYPE = r"(QNPN|QPNP|NMOS|PMOS|VCVS|VCCS|CCVS|CCCS|GND|R|C|V|L|I|E|F|G|H|D|B|Q|M)"
     NUMBER = r"[+-]?(\d+(\.\d*)?|\.\d+)"
     SCIENTIFIC_NOTATION = r"([eE][+-]?\d+)"
-    METRIC_SUFFIXES = r"(u|U|m|M|k|K|Meg|MEG|G|N|P|F|%)"
+    METRIC_SUFFIXES = r"(u|U|m|M|k|K|Meg|MEG|g|G|n|N|p|P|f|F|%)"
     # Names: any alphanumeric identifier. Optionally suffixed with ":TYPE" to
     # decouple the component name from its type prefix entirely.
     #   R1                — name=R1,   type=R (prefix-inferred)
@@ -99,6 +99,8 @@ class Component:
             cls._parse_diode(component, parts)
         elif component.type in {"QNPN", "QPNP"}:
             cls._parse_bjt(component, parts)
+        elif component.type in {"NMOS", "PMOS"}:
+            cls._parse_mos(component, parts)
         elif component.type == "B":
             cls._parse_behavioral(component, parts)
         elif component.type == "GND":
@@ -137,6 +139,7 @@ class Component:
             ("D", "D"),
             ("B", "B"),
             ("Q", "QNPN"),
+            ("M", "NMOS"),
         ):
             if upper_name.startswith(prefix):
                 return normalized
@@ -237,27 +240,63 @@ class Component:
     @classmethod
     def _parse_bjt(cls, component: "Component", parts: list[str]) -> None:
         # Small-signal hybrid-pi BJT:
-        #   Q1 collector base emitter QNPN gm rpi
-        #   Q1 collector base emitter gm rpi       (defaults to QNPN)
-        if len(parts) not in {6, 7}:
-            error_handler(f"COMPONENT_ERROR: '{component.name}' expected 6 or 7 parts, got {len(parts)}")
+        #   Q1 collector base emitter QNPN gm rpi [ro cpi cmu ccs rb re]
+        #   Q1 collector base emitter gm rpi [ro cpi cmu ccs rb re]       (defaults to QNPN)
+        if len(parts) < 6 or len(parts) > 13:
+            error_handler(f"COMPONENT_ERROR: '{component.name}' expected 6 to 13 parts, got {len(parts)}")
         component.node1 = parts[1]
         component.ctrl_node1 = parts[2]
         component.node2 = parts[3]
         if component.node1 == component.node2:
             error_handler(f"COMPONENT_ERROR: '{component.name}' collector and emitter must be different.")
-        if len(parts) == 7:
+        if len(parts) >= 7 and parts[4].upper() in {"QNPN", "QPNP"}:
             bjt_type = parts[4].upper()
-            if bjt_type not in {"QNPN", "QPNP"}:
-                error_handler(f"COMPONENT_ERROR: '{component.name}' has invalid BJT type '{parts[4]}'.")
             component.type = bjt_type
             component.subtype = bjt_type
-            component.value = parts[5]
-            component.value2 = parts[6]
+            params = parts[5:]
         else:
             component.subtype = component.type or "QNPN"
-            component.value = parts[4]
-            component.value2 = parts[5]
+            params = parts[4:]
+        if len(params) < 2 or len(params) > 8:
+            error_handler(f"COMPONENT_ERROR: '{component.name}' expected gm/rpi plus up to 6 model params.")
+        component.value = params[0]
+        component.value2 = params[1]
+        component.value3 = params[2] if len(params) >= 3 else "100k"
+        component.metadata["cpi"] = params[3] if len(params) >= 4 else "8p"
+        component.metadata["cmu"] = params[4] if len(params) >= 5 else "3p"
+        component.metadata["ccs"] = params[5] if len(params) >= 6 else "0"
+        component.metadata["rb"] = params[6] if len(params) >= 7 else "0"
+        component.metadata["re"] = params[7] if len(params) >= 8 else "0"
+
+    @classmethod
+    def _parse_mos(cls, component: "Component", parts: list[str]) -> None:
+        # Small-signal MOS:
+        #   M1 drain gate source NMOS gm ro cgs cgd [gmb cbs cbd]
+        #   M1 drain gate source gm ro cgs cgd      (defaults to NMOS)
+        if len(parts) < 8 or len(parts) > 12:
+            error_handler(f"COMPONENT_ERROR: '{component.name}' expected 8 to 12 parts, got {len(parts)}")
+        component.node1 = parts[1]
+        component.ctrl_node1 = parts[2]
+        component.node2 = parts[3]
+        if component.node1 == component.node2:
+            error_handler(f"COMPONENT_ERROR: '{component.name}' drain and source must be different.")
+        if len(parts) >= 9 and parts[4].upper() in {"NMOS", "PMOS"}:
+            mos_type = parts[4].upper()
+            component.type = mos_type
+            component.subtype = mos_type
+            params = parts[5:]
+        else:
+            component.subtype = component.type or "NMOS"
+            params = parts[4:]
+        if len(params) < 4 or len(params) > 7:
+            error_handler(f"COMPONENT_ERROR: '{component.name}' expected gm/ro/cgs/cgd plus up to 3 model params.")
+        component.value = params[0]
+        component.value2 = params[1]
+        component.value3 = params[2]
+        component.metadata["cgd"] = params[3]
+        component.metadata["gmb"] = params[4] if len(params) >= 5 else "0"
+        component.metadata["cbs"] = params[5] if len(params) >= 6 else "0"
+        component.metadata["cbd"] = params[6] if len(params) >= 7 else "0"
 
     @classmethod
     def _parse_behavioral(cls, component: "Component", parts: list[str]) -> None:
@@ -342,6 +381,30 @@ class Component:
                 error_handler(f"NETLIST_FATAL: '{self.name}' has invalid gm value '{self.value}'.")
             if not self.INDEPENDENT_VAL_PATTERN.match(self.value2 or ""):
                 error_handler(f"NETLIST_FATAL: '{self.name}' has invalid rpi value '{self.value2}'.")
+            for label, value in (
+                ("ro", self.value3),
+                ("cpi", self.metadata.get("cpi")),
+                ("cmu", self.metadata.get("cmu")),
+                ("ccs", self.metadata.get("ccs")),
+                ("rb", self.metadata.get("rb")),
+                ("re", self.metadata.get("re")),
+            ):
+                if value is not None and not self.INDEPENDENT_VAL_PATTERN.match(value):
+                    error_handler(f"NETLIST_FATAL: '{self.name}' has invalid {label} value '{value}'.")
+            return True
+
+        if self.type in {"NMOS", "PMOS"}:
+            for label, value in (
+                ("gm", self.value),
+                ("ro", self.value2),
+                ("cgs", self.value3),
+                ("cgd", self.metadata.get("cgd")),
+                ("gmb", self.metadata.get("gmb")),
+                ("cbs", self.metadata.get("cbs")),
+                ("cbd", self.metadata.get("cbd")),
+            ):
+                if value is None or not self.DEPENDENT_VAL_PATTERN.match(value):
+                    error_handler(f"NETLIST_FATAL: '{self.name}' has invalid {label} value '{value}'.")
             return True
 
         if self.type in {"VCVS", "VCCS", "CCVS", "CCCS"}:
@@ -404,6 +467,8 @@ class Netlist:
             self.current_source_nodes.extend([component.node1 or "0", component.node2 or "0"])
             if component.ctrl_node1:
                 self.other_nodes.extend([component.ctrl_node1, component.ctrl_node2 or "0"])
+        elif component.type in {"QNPN", "QPNP", "NMOS", "PMOS"}:
+            self.other_nodes.extend([component.node1 or "0", component.node2 or "0", component.ctrl_node1 or "0"])
         else:
             self.other_nodes.extend([component.node1 or "0", component.node2 or "0"])
 

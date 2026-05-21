@@ -445,6 +445,10 @@ textarea {
   font-size: 11px;
 }
 
+.treeItem__add + .treeItem__add {
+  margin-left: 4px;
+}
+
 .treeItem:hover .treeItem__add {
   opacity: 1;
 }
@@ -492,6 +496,30 @@ textarea {
   position: absolute;
   inset: 0;
   pointer-events: none;
+}
+
+.canvasDisplayBtn {
+  position: absolute;
+  top: 14px;
+  right: 16px;
+  z-index: 12;
+  pointer-events: auto;
+  padding: 7px 12px;
+  border: 1px solid rgba(110, 168, 255, 0.55);
+  background: rgba(17, 23, 38, 0.9);
+  color: var(--accent-2);
+  border-radius: 6px;
+  cursor: pointer;
+  box-shadow: var(--shadow-1);
+}
+
+.canvasDisplayBtn:hover {
+  background: var(--bg-2);
+}
+
+.canvasDisplayBtn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .tile {

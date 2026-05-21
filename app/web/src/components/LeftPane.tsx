@@ -110,6 +110,7 @@ export function LeftPane(props: Props) {
         <CollapsibleSection title={`Properties — ${props.selectedComponent.name}`} defaultOpen>
           <PropertyEditor
             component={props.selectedComponent}
+            levels={props.levels}
             onUpdate={(patch) => props.onUpdateComponent(props.selectedComponent!.id, patch)}
           />
         </CollapsibleSection>
@@ -333,47 +334,45 @@ function SimulationControls({
         </div>
       </div>
 
-      {(analysis.mode === "tran" || analysis.mode === "hb") && (
-        <div className="formRow" style={{ flexDirection: "column", alignItems: "stretch" }}>
-          <label style={{ marginBottom: 6 }}>Display nodes</label>
-          <div style={{ display: "flex", flexWrap: "wrap" }}>
-            {analysis.probeNodes.length === 0 ? (
-              <span className="hintText" style={{ marginLeft: 0 }}>
-                Empty = show all.
+      <div className="formRow" style={{ flexDirection: "column", alignItems: "stretch" }}>
+        <label style={{ marginBottom: 6 }}>Display nodes</label>
+        <div style={{ display: "flex", flexWrap: "wrap" }}>
+          {analysis.probeNodes.length === 0 ? (
+            <span className="hintText" style={{ marginLeft: 0 }}>
+              Empty = show all.
+            </span>
+          ) : (
+            analysis.probeNodes.map((n) => (
+              <span key={n} className="tag">
+                {n}
+                <button onClick={() => onRemoveProbeNode(n)} aria-label="Remove">
+                  ×
+                </button>
               </span>
-            ) : (
-              analysis.probeNodes.map((n) => (
-                <span key={n} className="tag">
-                  {n}
-                  <button onClick={() => onRemoveProbeNode(n)} aria-label="Remove">
-                    ×
-                  </button>
-                </span>
-              ))
-            )}
-          </div>
-          <select
-            className="select"
-            defaultValue=""
-            onChange={(e) => {
-              if (e.target.value) onAddProbeNode(e.target.value);
-              e.currentTarget.value = "";
-            }}
-            style={{ marginTop: 6 }}
-          >
-            <option value="" disabled>
-              Add node…
-            </option>
-            {availableNodes
-              .filter((n) => !analysis.probeNodes.includes(n))
-              .map((n) => (
-                <option key={n} value={n}>
-                  {n}
-                </option>
-              ))}
-          </select>
+            ))
+          )}
         </div>
-      )}
+        <select
+          className="select"
+          defaultValue=""
+          onChange={(e) => {
+            if (e.target.value) onAddProbeNode(e.target.value);
+            e.currentTarget.value = "";
+          }}
+          style={{ marginTop: 6 }}
+        >
+          <option value="" disabled>
+            Add node…
+          </option>
+          {availableNodes
+            .filter((n) => !analysis.probeNodes.includes(n))
+            .map((n) => (
+              <option key={n} value={n}>
+                {n}
+              </option>
+            ))}
+        </select>
+      </div>
 
       <button className="runBtn" disabled={running} onClick={onRun} style={{ marginTop: 6 }}>
         {running ? "Running…" : `Run ${analysis.mode}`}
@@ -480,21 +479,16 @@ function LevelBranch({
         >
           +sub
         </span>
-        {/* The single canonical root keeps the schematic anchored, but any
-            other level (top-level siblings created via "+ New top-level" or
-            nested children) is deletable. */}
-        {level.id !== "root" ? (
-          <span
-            className="treeItem__add"
-            onClick={(e) => {
-              e.stopPropagation();
-              onDelete(level.id);
-            }}
-            title="Delete this level (children are also removed)"
-          >
-            ×
-          </span>
-        ) : null}
+        <span
+          className="treeItem__add"
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete(level.id);
+          }}
+          title="Delete this level (children are also removed)"
+        >
+          ×
+        </span>
       </div>
       {children.map((c) => (
         <LevelBranch
@@ -541,25 +535,98 @@ function LibItem({ type, onClick }: { type: DeviceType; onClick: () => void }) {
 
 function PropertyEditor({
   component,
+  levels,
   onUpdate
 }: {
   component: CanvasComponent;
+  levels: SchematicLevel[];
   onUpdate: (patch: Partial<CanvasComponent>) => void;
 }) {
   const isSource = component.type === "V" || component.type === "I";
   const isControlled = component.type === "VCVS" || component.type === "VCCS";
   const isCurrentControlled = component.type === "CCCS" || component.type === "CCVS";
+  const isBjt = component.type === "QNPN" || component.type === "QPNP";
+  const isMos = component.type === "NMOS" || component.type === "PMOS";
+  const isSubckt = component.type === "SUBCKT";
+  const isLabel = component.type === "LABEL";
+  const isNode = component.type === "NODE";
+  const updateMetadata = (key: string, value: string) =>
+    onUpdate({ metadata: { ...(component.metadata ?? {}), [key]: value } });
+  const updatePinCount = (count: number) => {
+    const safeCount = Math.max(1, Math.min(24, count || 1));
+    const current = component.pins ?? [];
+    const pins = Array.from({ length: safeCount }, (_, i) => current[i] ?? `node_${i + 1}`);
+    onUpdate({ pins });
+  };
+  const updatePinName = (index: number, value: string) => {
+    const pins = [...(component.pins ?? [])];
+    pins[index] = value.trim() || `node_${index + 1}`;
+    onUpdate({ pins });
+  };
   return (
     <>
       <div className="formRow">
-        <label>Name</label>
+        <label>{isSubckt ? "displayed_name" : isLabel ? "text" : isNode ? "node" : "Name"}</label>
         <input
           className="input"
           value={component.name}
           onChange={(e) => onUpdate({ name: e.target.value })}
         />
       </div>
-      {component.type !== "GND" ? (
+      {isSubckt ? (
+        <>
+          <div className="formRow">
+            <label>entity_name</label>
+            <select
+              className="select"
+              value={component.subcircuitId ?? ""}
+              onChange={(e) => {
+                const entity = levels.find((level) => level.id === e.target.value);
+                onUpdate({
+                  subcircuitId: e.target.value,
+                  pins: entity?.pins?.length ? [...entity.pins] : component.pins
+                });
+              }}
+            >
+              <option value="">Unlinked</option>
+              {levels
+                .filter((level) => level.parentId !== null)
+                .map((level) => (
+                  <option key={level.id} value={level.id}>
+                    {level.title}
+                  </option>
+                ))}
+            </select>
+          </div>
+          <div className="formRow">
+            <label>nodes</label>
+            <input
+              className="input"
+              type="number"
+              min={1}
+              max={24}
+              value={(component.pins ?? []).length}
+              onChange={(e) => updatePinCount(Number(e.target.value))}
+            />
+          </div>
+          {(component.pins ?? []).map((pin, index) => (
+            <div className="formRow" key={`${component.id}-pin-${index}`}>
+              <label>{`node ${index + 1}`}</label>
+              <input
+                className="input"
+                value={pin}
+                onChange={(e) => updatePinName(index, e.target.value)}
+              />
+            </div>
+          ))}
+        </>
+      ) : null}
+      {isNode ? (
+        <div className="hintText">
+          Same-named Node markers are electrically connected. In a sub-entity, a node named in_1 exposes port_in_1 to matching SUBCKT pins.
+        </div>
+      ) : null}
+      {component.type !== "GND" && !isBjt && !isMos && !isSubckt && !isNode && !isLabel ? (
         <div className="formRow">
           <label>Value</label>
           <input
@@ -568,6 +635,66 @@ function PropertyEditor({
             onChange={(e) => onUpdate({ value: e.target.value })}
           />
         </div>
+      ) : null}
+      {isBjt ? (
+        <>
+          <div className="formRow">
+            <label>gm</label>
+            <input className="input" value={component.value} onChange={(e) => onUpdate({ value: e.target.value })} />
+          </div>
+          <div className="formRow">
+            <label>rπ</label>
+            <input className="input" value={component.value2 ?? ""} onChange={(e) => onUpdate({ value2: e.target.value })} />
+          </div>
+          <div className="formRow">
+            <label>ro</label>
+            <input className="input" value={component.value3 ?? ""} onChange={(e) => onUpdate({ value3: e.target.value })} />
+          </div>
+          <div className="formRow">
+            <label>Cπ</label>
+            <input className="input" value={component.metadata?.cpi ?? ""} onChange={(e) => updateMetadata("cpi", e.target.value)} />
+          </div>
+          <div className="formRow">
+            <label>Cμ</label>
+            <input className="input" value={component.metadata?.cmu ?? ""} onChange={(e) => updateMetadata("cmu", e.target.value)} />
+          </div>
+          <div className="formRow">
+            <label>Ccs</label>
+            <input className="input" value={component.metadata?.ccs ?? "0"} onChange={(e) => updateMetadata("ccs", e.target.value)} />
+          </div>
+        </>
+      ) : null}
+      {isMos ? (
+        <>
+          <div className="formRow">
+            <label>gm</label>
+            <input className="input" value={component.value} onChange={(e) => onUpdate({ value: e.target.value })} />
+          </div>
+          <div className="formRow">
+            <label>ro</label>
+            <input className="input" value={component.value2 ?? ""} onChange={(e) => onUpdate({ value2: e.target.value })} />
+          </div>
+          <div className="formRow">
+            <label>Cgs</label>
+            <input className="input" value={component.value3 ?? ""} onChange={(e) => onUpdate({ value3: e.target.value })} />
+          </div>
+          <div className="formRow">
+            <label>Cgd</label>
+            <input className="input" value={component.metadata?.cgd ?? ""} onChange={(e) => updateMetadata("cgd", e.target.value)} />
+          </div>
+          <div className="formRow">
+            <label>gmb</label>
+            <input className="input" value={component.metadata?.gmb ?? "0"} onChange={(e) => updateMetadata("gmb", e.target.value)} />
+          </div>
+          <div className="formRow">
+            <label>Cbs</label>
+            <input className="input" value={component.metadata?.cbs ?? "0"} onChange={(e) => updateMetadata("cbs", e.target.value)} />
+          </div>
+          <div className="formRow">
+            <label>Cbd</label>
+            <input className="input" value={component.metadata?.cbd ?? "0"} onChange={(e) => updateMetadata("cbd", e.target.value)} />
+          </div>
+        </>
       ) : null}
       {isSource ? (
         <>

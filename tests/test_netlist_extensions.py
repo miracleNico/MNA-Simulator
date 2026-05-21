@@ -323,6 +323,9 @@ def test_qnpn_small_signal_device_matches_hybrid_pi_shape() -> None:
         Rpi base emitter 2.5k
         Re emitter 0 470
         Rc collector 0 4.7k
+        Ro collector emitter 100k
+        Cpi base emitter 8p
+        Cmu base collector 3p
         G1 collector emitter base emitter 40m
         Cin in base 10u
         .tran 5m 50u
@@ -348,6 +351,46 @@ def test_qnpn_small_signal_device_matches_hybrid_pi_shape() -> None:
     assert compact_result.waveform is not None
     assert expanded_result.waveform.labels == compact_result.waveform.labels
     np.testing.assert_allclose(compact_result.waveform.values, expanded_result.waveform.values, rtol=1e-9, atol=1e-12)
+
+
+def test_qnpn_extended_small_signal_model_stamps_ro_and_caps() -> None:
+    circuit = parse_netlist_text(
+        """
+        Q1 collector base emitter QNPN 40m 2.5k 100k 8p 3p 1p
+        .ac 1 1e9 4
+        .end
+        """
+    )
+
+    problem = build_mna_problem(circuit)
+    labels = problem.metadata["labels"]
+    c = labels.index("V(collector)")
+    b = labels.index("V(base)")
+    e = labels.index("V(emitter)")
+    assert problem.G[c, c] > 0.0
+    assert problem.G[b, b] > 0.0
+    assert problem.C[b, e] < 0.0
+    assert problem.C[b, c] < 0.0
+    assert problem.C[c, e] < 0.0
+
+
+def test_mos_small_signal_model_is_backend_owned_with_caps() -> None:
+    circuit = parse_netlist_text(
+        """
+        M1 drain gate source NMOS 5m 50k 5p 1p 0 0 0
+        .ac 1 1e9 4
+        .end
+        """
+    )
+
+    problem = build_mna_problem(circuit)
+    labels = problem.metadata["labels"]
+    d = labels.index("V(drain)")
+    g = labels.index("V(gate)")
+    s = labels.index("V(source)")
+    assert problem.G[d, d] > 0.0
+    assert problem.C[g, s] < 0.0
+    assert problem.C[g, d] < 0.0
 
 
 # ---------------------------------------------------------------------------

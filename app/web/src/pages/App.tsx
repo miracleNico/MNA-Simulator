@@ -13,7 +13,8 @@ import {
   DeviceType,
   SchematicLevel,
   SchematicPreset,
-  buildSchematicPayload
+  buildSchematicPayload,
+  normalizeNodeName
 } from "../lib/schematic";
 
 const defaultAnalysis: AnalysisState = {
@@ -53,11 +54,107 @@ type TileRecord = {
 const LIBRARY_ITEMS: DeviceType[] = [
   "R", "C", "L", "V", "I", "D", "GND",
   "QNPN", "QPNP", "NMOS", "PMOS",
-  "VCVS", "VCCS", "CCCS", "CCVS", "SUBCKT"
+  "VCVS", "VCCS", "CCCS", "CCVS", "SUBCKT", "LABEL", "NODE"
 ];
 
 function genId(prefix: string): string {
   return `${prefix}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
+function samePins(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((pin, index) => pin === right[index]);
+}
+
+function uniquePins(pins: string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const pin of pins) {
+    if (seen.has(pin)) continue;
+    seen.add(pin);
+    out.push(pin);
+  }
+  return out;
+}
+
+function inferredLevelPins(level: SchematicLevel): string[] {
+  const pins: string[] = [];
+  const seen = new Set<string>();
+  for (const component of level.components) {
+    if (component.type !== "NODE") continue;
+    const pin = normalizeNodeName(component.name || component.value || component.id);
+    if (!seen.has(pin)) {
+      seen.add(pin);
+      pins.push(pin);
+    }
+  }
+  return pins.length > 0 ? pins : level.pins;
+}
+
+function rewriteSubcktPinEndpoints(
+  wires: CanvasWire[],
+  componentId: string,
+  oldPins: string[],
+  newPins: string[]
+): CanvasWire[] {
+  const validPins = new Set(newPins);
+  const renamedPins = new Map<string, string>();
+  for (let i = 0; i < Math.min(oldPins.length, newPins.length); i++) {
+    if (oldPins[i] && newPins[i] && oldPins[i] !== newPins[i]) {
+      renamedPins.set(oldPins[i], newPins[i]);
+    }
+  }
+
+  const resolvePin = (pin: string): string => {
+    const renamed = renamedPins.get(pin);
+    if (renamed) return renamed;
+    if (validPins.has(pin)) return pin;
+
+    const cleaned = normalizeNodeName(pin);
+    const exactNormalized = newPins.find((candidate) => normalizeNodeName(candidate) === cleaned);
+    if (exactNormalized) return exactNormalized;
+
+    const trimmed = cleaned.replace(/_+$/, "");
+    if (trimmed) {
+      const prefixMatch = newPins.find((candidate) => {
+        const normalized = normalizeNodeName(candidate);
+        return normalized === trimmed || normalized.startsWith(trimmed) || cleaned.startsWith(normalized);
+      });
+      if (prefixMatch) return prefixMatch;
+    }
+
+    const oldIndex = oldPins.indexOf(pin);
+    if (oldIndex >= 0 && oldIndex < newPins.length) return newPins[oldIndex];
+    return pin;
+  };
+
+  const rewriteEndpoint = (endpoint: CanvasWire["start"]): CanvasWire["start"] => {
+    if (endpoint.kind !== "pin" || endpoint.componentId !== componentId) return endpoint;
+    const nextPin = resolvePin(endpoint.pin);
+    return nextPin !== endpoint.pin ? { ...endpoint, pin: nextPin } : endpoint;
+  };
+  return wires.map((wire) => ({
+    ...wire,
+    start: rewriteEndpoint(wire.start),
+    end: rewriteEndpoint(wire.end)
+  }));
+}
+
+function syncInstancesForEntity(
+  level: SchematicLevel,
+  entityId: string,
+  oldPins: string[],
+  newPins: string[]
+): SchematicLevel {
+  let wires = level.wires;
+  let changed = false;
+  const components = level.components.map((component) => {
+    if (component.type !== "SUBCKT" || component.subcircuitId !== entityId) return component;
+    const existingPins = component.pins ?? oldPins;
+    wires = rewriteSubcktPinEndpoints(wires, component.id, existingPins, newPins);
+    changed = true;
+    return { ...component, pins: [...newPins] };
+  });
+  return changed ? { ...level, components, wires } : level;
 }
 
 export function App() {
@@ -177,9 +274,58 @@ export function App() {
 
   const updateComponent = useCallback(
     (id: string, patch: Partial<CanvasComponent>) => {
-      setActiveComponents((cur) => cur.map((c) => (c.id === id ? { ...c, ...patch } : c)));
+      setLevels((cur) => {
+        const activeBefore = cur.find((level) => level.id === activeLevelId);
+        const oldEntityPins = activeBefore
+          ? activeBefore.pins.length > 0 ? activeBefore.pins : inferredLevelPins(activeBefore)
+          : [];
+        let newEntityPins = oldEntityPins;
+        let entityPinsChanged = false;
+
+        const nextLevels = cur.map((level) => {
+          if (level.id !== activeLevelId) return level;
+          const previous = level.components.find((component) => component.id === id);
+          if (!previous) return level;
+
+          const nextComponents = level.components.map((component) =>
+            component.id === id ? { ...component, ...patch } : component
+          );
+
+          let nextWires = level.wires;
+          if (previous.type === "SUBCKT" && patch.pins) {
+            nextWires = rewriteSubcktPinEndpoints(
+              nextWires,
+              id,
+              previous.pins ?? [],
+              patch.pins
+            );
+          }
+
+          let nextLevel: SchematicLevel = { ...level, components: nextComponents, wires: nextWires };
+          if (level.parentId !== null && previous.type === "NODE") {
+            const oldNodePin = normalizeNodeName(previous.name || previous.value || previous.id);
+            const updatedNode = nextComponents.find((component) => component.id === id);
+            const newNodePin = normalizeNodeName(updatedNode?.name || updatedNode?.value || updatedNode?.id || oldNodePin);
+            newEntityPins = oldEntityPins.includes(oldNodePin)
+              ? uniquePins(oldEntityPins.map((pin) => (pin === oldNodePin ? newNodePin : pin)))
+              : inferredLevelPins(nextLevel);
+            if (!samePins(oldEntityPins, newEntityPins)) {
+              entityPinsChanged = true;
+              nextLevel = { ...nextLevel, pins: [...newEntityPins] };
+            }
+          }
+          return nextLevel;
+        });
+
+        if (!entityPinsChanged) return nextLevels;
+        return nextLevels.map((level) =>
+          level.id === activeLevelId
+            ? level
+            : syncInstancesForEntity(level, activeLevelId, oldEntityPins, newEntityPins)
+        );
+      });
     },
-    [setActiveComponents]
+    [activeLevelId]
   );
 
   /* -------------- Run simulation -------------- */
@@ -193,7 +339,8 @@ export function App() {
       activeLevel.components,
       activeLevel.wires,
       analysis,
-      levels
+      levels,
+      activeLevel.junctions ?? []
     );
     try {
       const res = await fetch("/api/simulate", {
@@ -228,11 +375,11 @@ export function App() {
             data
           });
         } else if (analysis.mode === "ac" && body.spectrum) {
-          const data = toSpectrumPlot(body.spectrum, "line");
+          const data = toSpectrumPlot(body.spectrum, { kind: "line", db: true, filterLabels: analysis.probeNodes });
           addTile({ title: `.ac sweep`, mode: "static", data });
         } else if (analysis.mode === "hb" && body.spectrum) {
           const f0 = Number(body?.metadata?.base_frequency_hz ?? 0);
-          const data = toSpectrumPlot(body.spectrum, "stem");
+          const data = toSpectrumPlot(body.spectrum, { kind: "stem", filterLabels: analysis.probeNodes });
           addTile({
             title: f0 > 0 ? `.hb spectrum · f0 ${formatCompact(f0)}Hz` : `.hb spectrum`,
             mode: "static",
@@ -253,7 +400,7 @@ export function App() {
           addTile({
             title: `.op — DC solution`,
             mode: "static",
-            data: opResultPlotData(body.labels, body.dc_solution)
+            data: opResultPlotData(body.labels, body.dc_solution, analysis.probeNodes)
           });
         }
       }
@@ -273,7 +420,8 @@ export function App() {
         activeLevel.components,
         activeLevel.wires,
         analysis,
-        levels
+        levels,
+        activeLevel.junctions ?? []
       );
       const speed = parseValue(analysis.dynSpeed);
       const tStopSim = parseValue(analysis.tStop);
@@ -343,6 +491,87 @@ export function App() {
     },
     [activeLevel, analysis, levels]
   );
+
+  const startCaredNodeDisplay = useCallback(() => {
+    if (analysis.probeNodes.length === 0) {
+      setStatus("error");
+      setStatusMsg("Add one or more display nodes first.");
+      return;
+    }
+
+    const payload = buildSchematicPayload(
+      activeLevel.components,
+      activeLevel.wires,
+      analysis,
+      levels,
+      activeLevel.junctions ?? []
+    );
+    const speed = parseValue(analysis.dynSpeed);
+    const tStopSim = parseValue(analysis.tStop);
+    const wallDuration = speed > 0 ? tStopSim / speed : 0;
+    const windowSim = parseValue(analysis.dynWindow);
+    const tileId = genId("tile");
+    const canvas = document.querySelector(".canvasArea") as HTMLElement | null;
+    const tileW = 520;
+    const tileH = 280;
+
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    const ws = new WebSocket(`${proto}://${location.host}/ws/dyn`);
+    const titleSuffix = analysis.continuous
+      ? "∞"
+      : `${wallDuration.toFixed(wallDuration >= 10 ? 0 : 1)}s`;
+    const labelsTitle = analysis.probeNodes.length === 1 ? analysis.probeNodes[0] : `${analysis.probeNodes.length} nodes`;
+    const tileRecord: TileRecord = {
+      id: tileId,
+      title: `.dyn ${labelsTitle} @ ${analysis.dynSpeed}s/s · ${titleSuffix}`,
+      x: Math.max(40, (canvas?.clientWidth ?? 620) - tileW - 24),
+      y: 56,
+      w: tileW,
+      h: tileH,
+      mode: "dyn",
+      socket: ws,
+      windowSeconds: windowSim
+    };
+    setTiles((cur) => [...cur, tileRecord]);
+
+    ws.onopen = () => {
+      ws.send(
+        JSON.stringify({
+          schematic: payload,
+          speed,
+          t_stop: analysis.tStop,
+          t_step: analysis.tStep,
+          window: analysis.dynWindow,
+          nodes: analysis.probeNodes,
+          continuous: analysis.continuous
+        })
+      );
+    };
+
+    let streamLabels: string[] = [];
+    ws.onmessage = (e) => {
+      const msg = JSON.parse(e.data);
+      if (msg.type === "meta") {
+        streamLabels = msg.labels ?? [];
+      } else if (msg.type === "frame") {
+        const rec = tilesRef.current.get(tileId);
+        if (rec?.push && streamLabels.length > 0) {
+          const vals = (msg.values as number[]).map((v) => Number(v) || 0);
+          rec.push(Number(msg.t), vals, streamLabels);
+        }
+      } else if (msg.type === "done") {
+        const rec = tilesRef.current.get(tileId);
+        rec?.finalize?.();
+      } else if (msg.type === "error") {
+        setStatus("error");
+        setStatusMsg(String(msg.message));
+      }
+    };
+    ws.onerror = () => {
+      setStatus("error");
+      setStatusMsg("Realtime display failed.");
+    };
+  }, [activeLevel, analysis, levels]);
 
   /* Track tile-id → push/finalize handles without re-renders. */
   const tilesRef = useRef<Map<string, TileRecord>>(new Map());
@@ -451,7 +680,6 @@ export function App() {
     updateLevel(id, { title });
   }
   function deleteLevel(id: string) {
-    if (id === "root") return;
     // Collect ``id`` plus every descendant via BFS so an entire subtree is
     // dropped in one operation. Without this, deleting a parent would orphan
     // its children, leaving stale entries in the hierarchy tree.
@@ -466,8 +694,26 @@ export function App() {
         }
       }
     }
-    setLevels((cur) => cur.filter((l) => !doomed.has(l.id)));
-    if (doomed.has(activeLevelId)) setActiveLevelId("root");
+    setLevels((cur) => {
+      const survivors = cur.filter((l) => !doomed.has(l.id));
+      if (survivors.length > 0) {
+        return survivors;
+      }
+      return [
+        {
+          id: "root",
+          title: "Top level",
+          components: [],
+          wires: [],
+          pins: [],
+          parentId: null
+        }
+      ];
+    });
+    if (doomed.has(activeLevelId)) {
+      const survivors = levels.filter((l) => !doomed.has(l.id));
+      setActiveLevelId(survivors.find((l) => l.parentId === null)?.id ?? survivors[0]?.id ?? "root");
+    }
   }
 
   /* -------------- Copy / paste -------------- */
@@ -624,6 +870,14 @@ export function App() {
           onCopy={onCopy}
           onPaste={onPaste}
         />
+        <button
+          className="canvasDisplayBtn"
+          disabled={analysis.probeNodes.length === 0}
+          onClick={startCaredNodeDisplay}
+          title="Start a dynamic display for the selected display nodes"
+        >
+          Display
+        </button>
         <div className="tileLayer">
           {tiles.map((tile) => (
             <PlotTile
@@ -728,7 +982,8 @@ function toSpectrumPlot(spectrum: {
   frequencies: number[];
   magnitudes: number[][] | number[];
   labels: string[];
-}, kind: PlotData["kind"] = "line"): PlotData {
+}, options: { kind?: PlotData["kind"]; db?: boolean; filterLabels?: string[] } = {}): PlotData {
+  const kind = options.kind ?? "line";
   const freq = spectrum.frequencies ?? [];
   const mag = spectrum.magnitudes ?? [];
   const labels = spectrum.labels ?? [];
@@ -759,25 +1014,41 @@ function toSpectrumPlot(spectrum: {
   } else {
     series = [{ label: labels[0] ?? "|H|", values: (mag as number[]).map((v) => Number(v)) }];
   }
+  if (options.filterLabels && options.filterLabels.length > 0) {
+    const wanted = new Set(options.filterLabels);
+    series = series.filter((s) => wanted.has(s.label));
+  }
+  if (options.db) {
+    series = series.map((s) => ({
+      ...s,
+      values: s.values.map((v) => 20 * Math.log10(Math.max(Math.abs(v), 1e-15)))
+    }));
+  }
   return {
     x: freq,
     series,
     xLabel: "frequency (Hz)",
-    yLabel: "magnitude",
+    yLabel: options.db ? "magnitude (dB)" : "magnitude",
     kind,
     logX: kind === "line",
-    title: kind === "stem" ? "Harmonic magnitudes" : undefined
+    title: kind === "stem" ? "Harmonic magnitudes" : options.db ? "AC magnitude" : undefined
   };
 }
 
-function opResultPlotData(labels: string[], values: number[]): PlotData {
-  const x = labels.map((_, i) => i);
+function opResultPlotData(labels: string[], values: number[], filterLabels: string[] = []): PlotData {
+  const wanted = new Set(filterLabels);
+  const pairs = labels
+    .map((label, i) => ({ label, value: Number(values[i] ?? 0) }))
+    .filter((entry) => filterLabels.length === 0 || wanted.has(entry.label));
+  const x = pairs.map((_, i) => i);
   return {
     x,
-    series: [{ label: "V (.op)", values }],
-    xLabel: "node index",
-    yLabel: "V",
-    title: labels.join("  ·  ")
+    series: [{ label: "DC", values: pairs.map((entry) => entry.value) }],
+    xLabel: "",
+    yLabel: "value",
+    kind: "bar",
+    xTickLabels: pairs.map((entry) => entry.label),
+    title: "DC operating point"
   };
 }
 

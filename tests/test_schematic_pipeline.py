@@ -5,7 +5,7 @@ import pytest
 from mna_simulation.api.contracts import AnalysisMode, AnalysisRequest, SchematicDocument
 from mna_simulation.api.service import SimulationService
 from mna_simulation.errors import NetlistError
-from mna_simulation.schematic_pipeline import schematic_to_circuit_ir, schematic_to_netlist
+from mna_simulation.schematic_pipeline import _flatten_subcircuits, schematic_to_circuit_ir, schematic_to_netlist
 
 
 def _simple_op_schematic() -> SchematicDocument:
@@ -177,6 +177,150 @@ def test_hierarchy_keeps_top_level_net_names_and_marks_internal_nets() -> None:
     assert "R1 n1 x1 1k" in netlist_text
     assert "R2 x1 n2 2k" in netlist_text
     assert " n3 " not in netlist_text
+
+
+def test_three_level_hierarchy_uses_logical_instance_port_names() -> None:
+    schematic = SchematicDocument(
+        components=[
+            {"id": "gnd1", "type": "GND", "name": "GND1"},
+            {"id": "v1", "type": "V", "name": "V1", "subtype": "DC", "value": "1"},
+            {"id": "amp-block", "type": "SUBCKT", "name": "AmpBlock", "subcircuit_id": "amp", "pins": ["in", "out"]},
+            {"id": "rload", "type": "R", "name": "Rload", "value": "10k"},
+        ],
+        wires=[
+            {
+                "id": "w-v-g",
+                "start": {"kind": "component_pin", "component_id": "v1", "pin": "n"},
+                "end": {"kind": "component_pin", "component_id": "gnd1", "pin": "g"},
+            },
+            {
+                "id": "w-in",
+                "start": {"kind": "component_pin", "component_id": "v1", "pin": "p"},
+                "end": {"kind": "component_pin", "component_id": "amp-block", "pin": "in"},
+            },
+            {
+                "id": "w-out",
+                "start": {"kind": "component_pin", "component_id": "amp-block", "pin": "out"},
+                "end": {"kind": "component_pin", "component_id": "rload", "pin": "p"},
+            },
+            {
+                "id": "w-r-g",
+                "start": {"kind": "component_pin", "component_id": "rload", "pin": "n"},
+                "end": {"kind": "component_pin", "component_id": "gnd1", "pin": "g"},
+            },
+        ],
+        subcircuits={
+            "amp": {
+                "components": [
+                    {
+                        "id": "diff",
+                        "type": "SUBCKT",
+                        "name": "DiffAmp",
+                        "subcircuit_id": "diff-core",
+                        "pins": ["in_p", "out"],
+                    },
+                ],
+                "junctions": [{"id": "port_in"}, {"id": "port_out"}],
+                "wires": [
+                    {
+                        "id": "w-amp-in",
+                        "start": {"kind": "junction", "junction_id": "port_in"},
+                        "end": {"kind": "component_pin", "component_id": "diff", "pin": "in_p"},
+                    },
+                    {
+                        "id": "w-amp-out",
+                        "start": {"kind": "component_pin", "component_id": "diff", "pin": "out"},
+                        "end": {"kind": "junction", "junction_id": "port_out"},
+                    },
+                ],
+            },
+            "diff-core": {
+                "components": [
+                    {"id": "rdiff", "type": "R", "name": "Rdiff", "value": "1k"},
+                ],
+                "junctions": [{"id": "port_in_p"}, {"id": "port_out"}],
+                "wires": [
+                    {
+                        "id": "w-core-in",
+                        "start": {"kind": "junction", "junction_id": "port_in_p"},
+                        "end": {"kind": "component_pin", "component_id": "rdiff", "pin": "p"},
+                    },
+                    {
+                        "id": "w-core-out",
+                        "start": {"kind": "component_pin", "component_id": "rdiff", "pin": "n"},
+                        "end": {"kind": "junction", "junction_id": "port_out"},
+                    },
+                ],
+            },
+        },
+        analysis={"mode": "op", "params": {}},
+    )
+
+    flattened = _flatten_subcircuits(schematic)
+    junction_ids = {junction.id for junction in flattened.junctions}
+
+    assert "AmpBlock.in" in junction_ids
+    assert "AmpBlock.DiffAmp.in_p" in junction_ids
+    assert "amp-block$port_in" not in junction_ids
+    assert "diff$port_in_p" not in junction_ids
+
+    netlist_text, pin_assignment = schematic_to_netlist(schematic)
+
+    assert "V1 n1 0 DC 1" in netlist_text
+    assert "Rload n2 0 10k" in netlist_text
+    assert "R1 n1 n2 1k" in netlist_text
+    assert pin_assignment["cp:AmpBlock.DiffAmp.rdiff:p"] == "n1"
+    assert pin_assignment["cp:AmpBlock.DiffAmp.rdiff:n"] == "n2"
+
+
+def test_hierarchy_rejects_child_port_names_that_do_not_match_instance_pins() -> None:
+    schematic = SchematicDocument(
+        components=[
+            {"id": "gnd1", "type": "GND", "name": "GND1"},
+            {"id": "v1", "type": "V", "name": "V1", "subtype": "DC", "value": "1"},
+            {
+                "id": "diff",
+                "type": "SUBCKT",
+                "name": "DiffAmp",
+                "subcircuit_id": "diff-core",
+                "pins": ["in_p", "out"],
+            },
+            {"id": "rload", "type": "R", "name": "Rload", "value": "10k"},
+        ],
+        wires=[
+            {
+                "id": "w-v-g",
+                "start": {"kind": "component_pin", "component_id": "v1", "pin": "n"},
+                "end": {"kind": "component_pin", "component_id": "gnd1", "pin": "g"},
+            },
+            {
+                "id": "w-in",
+                "start": {"kind": "component_pin", "component_id": "v1", "pin": "p"},
+                "end": {"kind": "component_pin", "component_id": "diff", "pin": "in_p"},
+            },
+            {
+                "id": "w-out",
+                "start": {"kind": "component_pin", "component_id": "diff", "pin": "out"},
+                "end": {"kind": "component_pin", "component_id": "rload", "pin": "p"},
+            },
+            {
+                "id": "w-r-g",
+                "start": {"kind": "component_pin", "component_id": "rload", "pin": "n"},
+                "end": {"kind": "component_pin", "component_id": "gnd1", "pin": "g"},
+            },
+        ],
+        subcircuits={
+            "diff-core": {
+                "components": [{"id": "rdiff", "type": "R", "name": "Rdiff", "value": "1k"}],
+                "junctions": [{"id": "port_input"}, {"id": "port_out"}],
+                "wires": [],
+            },
+        },
+        analysis={"mode": "op", "params": {}},
+    )
+
+    with pytest.raises(NetlistError, match=r"DiffAmp\.in_p"):
+        schematic_to_netlist(schematic)
 
 
 def test_disconnected_pin_raises_error() -> None:

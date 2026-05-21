@@ -19,8 +19,10 @@ export type PlotData = {
   xLabel?: string;
   yLabel?: string;
   title?: string;
-  /** Line for sweeps/waveforms, stem for discrete spectra. */
-  kind?: "line" | "stem";
+  /** Line for sweeps/waveforms, stem for discrete spectra, bar for categorical summaries. */
+  kind?: "line" | "stem" | "bar";
+  /** Optional labels for categorical x values such as .op solution entries. */
+  xTickLabels?: string[];
   /** Display x in log scale (AC sweeps). */
   logX?: boolean;
   /** Display y in log scale. */
@@ -55,7 +57,7 @@ export function drawPlot(ctx: CanvasRenderingContext2D, w: number, h: number, da
   // Axis ranges
   const xs = data.x;
   const allYs = data.series.flatMap((s) => s.values).filter((v) => Number.isFinite(v));
-  if (xs.length < 2 || allYs.length === 0) {
+  if ((xs.length < 2 && data.kind !== "bar") || allYs.length === 0) {
     drawEmptyState(ctx, w, h, "no samples yet");
     return;
   }
@@ -64,9 +66,13 @@ export function drawPlot(ctx: CanvasRenderingContext2D, w: number, h: number, da
   const xFinite = xs.filter((v) => Number.isFinite(v) && (!useLogX || v > 0));
   let xMin = Math.min(...xFinite);
   let xMax = Math.max(...xFinite);
+  if (data.kind === "bar") {
+    xMin -= 0.5;
+    xMax += 0.5;
+  }
   if (xMin === xMax) xMax = xMin + 1;
 
-  let yMin = data.kind === "stem" ? Math.min(0, ...allYs) : Math.min(...allYs);
+  let yMin = data.kind === "stem" || data.kind === "bar" ? Math.min(0, ...allYs) : Math.min(...allYs);
   let yMax = Math.max(...allYs);
   if (yMin === yMax) {
     yMin -= 1;
@@ -83,7 +89,12 @@ export function drawPlot(ctx: CanvasRenderingContext2D, w: number, h: number, da
   ctx.font = "10px Inter, system-ui, sans-serif";
   ctx.lineWidth = 1;
 
-  const xTicks = useLogX ? logTicks(xMin, xMax) : niceTicks(xMin, xMax, 6);
+  const xTicks =
+    data.kind === "bar"
+      ? xs.filter((v) => Number.isFinite(v))
+      : useLogX
+        ? logTicks(xMin, xMax)
+        : niceTicks(xMin, xMax, 6);
   const yTicks = niceTicks(yMin, yMax, 5);
 
   ctx.beginPath();
@@ -117,7 +128,9 @@ export function drawPlot(ctx: CanvasRenderingContext2D, w: number, h: number, da
   ctx.textBaseline = "top";
   for (const tv of xTicks) {
     const px = scaleX(tv, xMin, xMax, plotW, padL, useLogX);
-    ctx.fillText(formatTick(tv), px, padT + plotH + 6);
+    const label = data.kind === "bar" ? data.xTickLabels?.[Math.round(tv)] ?? formatTick(tv) : formatTick(tv);
+    const trimmed = label.length > 11 ? `${label.slice(0, 10)}…` : label;
+    ctx.fillText(trimmed, px, padT + plotH + 6);
   }
   ctx.textAlign = "right";
   ctx.textBaseline = "middle";
@@ -153,14 +166,30 @@ export function drawPlot(ctx: CanvasRenderingContext2D, w: number, h: number, da
 
   // Series
   data.series.forEach((series, sIdx) => {
-    if (series.values.length < 2) return;
+    if (series.values.length < 2 && data.kind !== "bar") return;
     const color = series.color ?? PALETTE[sIdx % PALETTE.length];
     ctx.save();
     ctx.strokeStyle = color;
     ctx.lineWidth = data.kind === "stem" ? 1.2 : 1.6;
     ctx.lineJoin = "round";
     const n = Math.min(series.values.length, xs.length);
-    if (data.kind === "stem") {
+    if (data.kind === "bar") {
+      const baseline = padT + plotH - ((0 - yMin) / (yMax - yMin)) * plotH;
+      const groupW = Math.max(8, plotW / Math.max(1, xs.length) * 0.7);
+      const barW = Math.max(3, groupW / Math.max(1, data.series.length));
+      const groupOffset = (sIdx - (data.series.length - 1) / 2) * barW;
+      ctx.fillStyle = color;
+      for (let i = 0; i < n; i++) {
+        if (!Number.isFinite(xs[i]) || !Number.isFinite(series.values[i])) continue;
+        const x = scaleX(xs[i], xMin, xMax, plotW, padL, false) + groupOffset - barW / 2;
+        const y = padT + plotH - ((series.values[i] - yMin) / (yMax - yMin)) * plotH;
+        const top = Math.min(y, baseline);
+        const height = Math.max(1, Math.abs(baseline - y));
+        ctx.globalAlpha = 0.88;
+        ctx.fillRect(x, top, barW, height);
+      }
+      ctx.globalAlpha = 1;
+    } else if (data.kind === "stem") {
       const baseline = padT + plotH - ((0 - yMin) / (yMax - yMin)) * plotH;
       const offset = (sIdx - (data.series.length - 1) / 2) * 5;
       for (let i = 0; i < n; i++) {

@@ -192,6 +192,8 @@ class SchematicComponent(BaseModel):
         "CCVS",
         "QNPN",
         "QPNP",
+        "NMOS",
+        "PMOS",
         "SUBCKT",
     ]
     name: str | None = None
@@ -221,6 +223,8 @@ class SchematicComponent(BaseModel):
             "D": "1e-15",
             "QNPN": "40m",
             "QPNP": "40m",
+            "NMOS": "5m",
+            "PMOS": "5m",
         }
         if self.type in defaults and (self.value is None or str(self.value).strip() == ""):
             self.value = defaults[self.type]

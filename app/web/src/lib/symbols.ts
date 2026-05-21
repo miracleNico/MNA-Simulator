@@ -354,6 +354,38 @@ function drawSubckt(ctx: CanvasRenderingContext2D, theme: SymbolTheme, component
   ctx.restore();
 }
 
+function drawLabel(ctx: CanvasRenderingContext2D, theme: SymbolTheme, component: CanvasComponent): void {
+  const text = component.name || component.value || "label";
+  ctx.save();
+  ctx.fillStyle = theme.label;
+  ctx.font = "600 12px Inter, system-ui, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(text, 0, 0);
+  ctx.restore();
+}
+
+function drawNodeMarker(ctx: CanvasRenderingContext2D, theme: SymbolTheme, component: CanvasComponent): void {
+  const text = component.name || component.value || "node";
+  ctx.save();
+  ctx.fillStyle = theme.accent;
+  ctx.strokeStyle = theme.accent;
+  ctx.lineWidth = 1.8;
+  ctx.beginPath();
+  ctx.arc(0, 0, 5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(8, 0);
+  ctx.lineTo(22, 0);
+  ctx.stroke();
+  ctx.fillStyle = theme.label;
+  ctx.font = "600 10px Inter, system-ui, sans-serif";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  ctx.fillText(text, 26, 0);
+  ctx.restore();
+}
+
 export function drawComponent(
   ctx: CanvasRenderingContext2D,
   component: CanvasComponent,
@@ -400,6 +432,12 @@ export function drawComponent(
       break;
     case "SUBCKT":
       drawSubckt(ctx, theme, component);
+      break;
+    case "LABEL":
+      drawLabel(ctx, theme, component);
+      break;
+    case "NODE":
+      drawNodeMarker(ctx, theme, component);
       break;
     case "QNPN":
       drawBJT(ctx, theme, "npn");

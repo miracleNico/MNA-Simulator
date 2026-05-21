@@ -32,9 +32,12 @@ PIN_LAYOUT: dict[str, tuple[str, ...]] = {
     "CCVS": ("p", "n"),
     "QNPN": ("c", "b", "e"),
     "QPNP": ("c", "b", "e"),
+    "NMOS": ("d", "g", "s"),
+    "PMOS": ("d", "g", "s"),
 }
 
-DEVICE_NAME_PATTERN = re.compile(r"^(R|C|L|V|I|D|E|G|F|H|Q)\w*$", re.IGNORECASE)
+DEVICE_NAME_PATTERN = re.compile(r"^(R|C|L|V|I|D|E|G|F|H|Q|M)\w*$", re.IGNORECASE)
+PORT_PREFIX = "port_"
 
 
 @dataclass(slots=True)
@@ -78,6 +81,69 @@ def _endpoint_key(endpoint: SchematicEndpoint) -> str:
     if endpoint.kind == "component_pin":
         return f"cp:{endpoint.component_id}:{endpoint.pin}"
     return f"jn:{endpoint.junction_id}"
+
+
+def _logical_segment(component: SchematicComponent) -> str:
+    raw = (component.name or component.id).strip()
+    segment = re.sub(r"[^A-Za-z0-9_]+", "_", raw).strip("_")
+    return segment or component.id
+
+
+def _instance_prefix(parent_prefix: str, component: SchematicComponent) -> str:
+    return f"{parent_prefix}{_logical_segment(component)}."
+
+
+def _port_name_from_junction_id(junction_id: str) -> str | None:
+    if not junction_id.lower().startswith(PORT_PREFIX):
+        return None
+    return junction_id[len(PORT_PREFIX) :]
+
+
+def _port_junction_id(instance_prefix: str, pin: str) -> str:
+    return f"{instance_prefix}{pin}"
+
+
+def _rename_junction_id(junction_id: str, prefix: str) -> str:
+    if not prefix:
+        return junction_id
+    port_name = _port_name_from_junction_id(junction_id)
+    if port_name is not None:
+        return _port_junction_id(prefix, port_name)
+    return f"{prefix}{junction_id}"
+
+
+def _exported_port_names(schematic: SchematicDocument) -> set[str]:
+    ports: set[str] = set()
+    for junction in schematic.junctions:
+        port_name = _port_name_from_junction_id(junction.id)
+        if port_name is not None:
+            ports.add(port_name)
+    return ports
+
+
+def _validate_subckt_ports(
+    component: SchematicComponent,
+    subcircuit: SchematicDocument,
+    logical_prefix: str,
+) -> None:
+    expected = set(component.pins or [])
+    actual = _exported_port_names(subcircuit)
+    if expected == actual:
+        return
+    missing = sorted(expected - actual)
+    extra = sorted(actual - expected)
+    parts: list[str] = []
+    if missing:
+        logical = ", ".join(_port_junction_id(logical_prefix, pin) for pin in missing)
+        local = ", ".join(f"{PORT_PREFIX}{pin}" for pin in missing)
+        parts.append(f"missing child ports {logical} (local junctions: {local})")
+    if extra:
+        logical = ", ".join(_port_junction_id(logical_prefix, pin) for pin in extra)
+        parts.append(f"unexpected child ports {logical}")
+    error_handler(
+        f"NETLIST_FATAL: SUBCKT instance '{component.name or component.id}' port mismatch: "
+        + "; ".join(parts)
+    )
 
 
 def _expected_pins(component_type: str, component: "SchematicComponent | None" = None) -> tuple[str, ...]:
@@ -153,7 +219,11 @@ def _build_analysis_line(
 
 
 def _auto_name(component: SchematicComponent, counters: dict[str, int], used_names: set[str]) -> str:
-    prefix = "Q" if component.type in {"QNPN", "QPNP"} else component.type
+    prefix = (
+        "Q" if component.type in {"QNPN", "QPNP"}
+        else "M" if component.type in {"NMOS", "PMOS"}
+        else component.type
+    )
     if prefix == "GND":
         return component.name or component.id
 
@@ -189,7 +259,25 @@ def _build_component_line(
         emitter = nodes.get("e", "")
         gm = component.value or "40m"
         r_pi = component.value2 or "2.5k"
-        return f"{name} {collector} {base} {emitter} {component.type} {gm} {r_pi}"
+        r_o = component.value3 or "100k"
+        c_pi = component.metadata.get("cpi", "8p")
+        c_mu = component.metadata.get("cmu", "3p")
+        c_cs = component.metadata.get("ccs", "0")
+        rb = component.metadata.get("rb", "0")
+        re = component.metadata.get("re", "0")
+        return f"{name} {collector} {base} {emitter} {component.type} {gm} {r_pi} {r_o} {c_pi} {c_mu} {c_cs} {rb} {re}"
+    if component.type in {"NMOS", "PMOS"}:
+        drain = nodes.get("d", "")
+        gate = nodes.get("g", "")
+        source = nodes.get("s", "")
+        gm = component.value or "5m"
+        r_o = component.value2 or "50k"
+        c_gs = component.value3 or "5p"
+        c_gd = component.metadata.get("cgd", "1p")
+        g_mb = component.metadata.get("gmb", "0")
+        c_bs = component.metadata.get("cbs", "0")
+        c_bd = component.metadata.get("cbd", "0")
+        return f"{name} {drain} {gate} {source} {component.type} {gm} {r_o} {c_gs} {c_gd} {g_mb} {c_bs} {c_bd}"
     if component.type == "VCVS":
         cp = nodes.get("cp", component.ctrl_node1 or "0")
         cn = nodes.get("cn", component.ctrl_node2 or "0")
@@ -303,7 +391,7 @@ def _top_level_net_name_hints(schematic: SchematicDocument) -> dict[str, str]:
             _, component_id, pin = key.split(":", 2)
             component = component_lookup.get(component_id)
             if component and component.type == "SUBCKT":
-                hints[f"jn:{component.id}$port_{pin}"] = name
+                hints[f"jn:{_port_junction_id(_instance_prefix('', component), pin)}"] = name
             else:
                 hints[key] = name
         else:
@@ -318,11 +406,11 @@ def _flatten_subcircuits(
 ) -> SchematicDocument:
     """Recursively inline SUBCKT instances into a single flat SchematicDocument.
 
-    Each instance's inner components/wires/junctions get namespaced by the instance id.
-    Ports in the sub-schematic are represented as named junctions in the form
-    ``port_<pinname>``. Outer wires touching the SUBCKT instance pin are rewritten
-    to terminate on the namespaced inner port junction so existing net formation
-    continues to work unchanged.
+    Each instance's inner components/wires/junctions get namespaced by the
+    logical instance path. Ports in the sub-schematic are represented locally
+    as named junctions in the form ``port_<pinname>`` and flatten to
+    ``InstanceName.pinname``. Outer wires touching the SUBCKT instance pin are
+    rewritten to terminate on that logical port junction.
     """
 
     has_sub = any(c.type == "SUBCKT" for c in schematic.components)
@@ -333,7 +421,7 @@ def _flatten_subcircuits(
         renamed_components = [_rename_component(c, instance_prefix) for c in schematic.components]
         renamed_wires = [_rename_wire(w, instance_prefix) for w in schematic.wires]
         renamed_junctions = [
-            SchematicJunction(id=f"{instance_prefix}{j.id}", position=j.position)
+            SchematicJunction(id=_rename_junction_id(j.id, instance_prefix), position=j.position)
             for j in schematic.junctions
         ]
         return SchematicDocument(
@@ -359,7 +447,7 @@ def _flatten_subcircuits(
         wires.append(_rename_wire(w, instance_prefix))
     if instance_prefix:
         junctions = [
-            SchematicJunction(id=f"{instance_prefix}{j.id}", position=j.position)
+            SchematicJunction(id=_rename_junction_id(j.id, instance_prefix), position=j.position)
             for j in junctions
         ]
 
@@ -371,6 +459,7 @@ def _flatten_subcircuits(
         return wid
 
     # For each SUBCKT instance, inline its subcircuit and stitch pins.
+    used_child_prefixes: set[str] = set()
     for c in schematic.components:
         if c.type != "SUBCKT":
             continue
@@ -378,12 +467,19 @@ def _flatten_subcircuits(
             error_handler(
                 f"NETLIST_FATAL: SUBCKT instance '{c.id}' references missing subcircuit '{c.subcircuit_id}'."
             )
-        sub_prefix = f"{instance_prefix}{c.id}$"
+        sub_prefix = _instance_prefix(instance_prefix, c)
+        if sub_prefix in used_child_prefixes:
+            error_handler(
+                f"NETLIST_FATAL: Duplicate SUBCKT logical name '{_logical_segment(c)}' under '{instance_prefix or 'root'}'."
+            )
+        used_child_prefixes.add(sub_prefix)
+        subcircuit = schematic.subcircuits[c.subcircuit_id]
+        _validate_subckt_ports(c, subcircuit, sub_prefix)
         inner_flat = _flatten_subcircuits(
             SchematicDocument(
-                components=schematic.subcircuits[c.subcircuit_id].components,
-                wires=schematic.subcircuits[c.subcircuit_id].wires,
-                junctions=schematic.subcircuits[c.subcircuit_id].junctions,
+                components=subcircuit.components,
+                wires=subcircuit.wires,
+                junctions=subcircuit.junctions,
                 subcircuits=schematic.subcircuits,
             ),
             instance_prefix=sub_prefix,
@@ -392,15 +488,12 @@ def _flatten_subcircuits(
         wires.extend(inner_flat.wires)
         junctions.extend(inner_flat.junctions)
 
-        # The SUBCKT block declares its external pins via `pins`. Inner components
-        # are expected to expose ports named "port_<pinname>" on a special PORT symbol,
-        # but for this pass we map pins 1:1 by a dedicated junction per pin on the inner side.
-        # We connect each external instance pin to an inner junction named
-        # "<sub_prefix>port_<pinname>" that the sub-schematic must include.
+        # The SUBCKT block declares its external pins via `pins`; the child
+        # schematic must expose exactly matching local junctions named
+        # "port_<pinname>". Those child ports flatten to logical junction names
+        # such as "DiffAmp.in_p".
         for pin in c.pins or []:
-            port_junction_id = f"{sub_prefix}port_{pin}"
-            if not any(j.id == port_junction_id for j in junctions):
-                junctions.append(SchematicJunction(id=port_junction_id))
+            port_junction_id = _port_junction_id(sub_prefix, pin)
             # Rewrite all outer wires that ended on this SUBCKT instance's pin to the port junction.
             for w in schematic.wires:
                 for end in (w.start, w.end):
@@ -410,10 +503,9 @@ def _flatten_subcircuits(
                         and end.pin == pin
                     ):
                         other = w.end if end is w.start else w.start
-                        if _endpoint_on_subckt(other, schematic):
-                            # Handled when the other SUBCKT is processed.
-                            continue
-                        outer_endpoint = _rename_endpoint(other, instance_prefix)
+                        outer_endpoint = _subckt_port_endpoint(other, schematic, instance_prefix)
+                        if outer_endpoint is None:
+                            outer_endpoint = _rename_endpoint(other, instance_prefix)
                         wires.append(
                             SchematicWire(
                                 id=new_wire_id(),
@@ -440,6 +532,22 @@ def _endpoint_on_subckt(endpoint: SchematicEndpoint, schematic: SchematicDocumen
         if c.id == endpoint.component_id and c.type == "SUBCKT":
             return True
     return False
+
+
+def _subckt_port_endpoint(
+    endpoint: SchematicEndpoint,
+    schematic: SchematicDocument,
+    instance_prefix: str,
+) -> SchematicEndpoint | None:
+    if endpoint.kind != "component_pin" or endpoint.component_id is None or endpoint.pin is None:
+        return None
+    for component in schematic.components:
+        if component.id == endpoint.component_id and component.type == "SUBCKT":
+            return SchematicEndpoint(
+                kind="junction",
+                junction_id=_port_junction_id(_instance_prefix(instance_prefix, component), endpoint.pin),
+            )
+    return None
 
 
 def _rename_component(c: SchematicComponent, prefix: str) -> SchematicComponent:
@@ -472,7 +580,7 @@ def _rename_endpoint(endpoint: SchematicEndpoint, prefix: str) -> SchematicEndpo
             component_id=f"{prefix}{endpoint.component_id}",
             pin=endpoint.pin,
         )
-    return SchematicEndpoint(kind="junction", junction_id=f"{prefix}{endpoint.junction_id}")
+    return SchematicEndpoint(kind="junction", junction_id=_rename_junction_id(endpoint.junction_id, prefix))
 
 
 def _rename_wire(w: SchematicWire, prefix: str) -> SchematicWire:
