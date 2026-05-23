@@ -47,12 +47,24 @@ export const USER_GUIDE_SECTIONS: UserGuideSection[] = [
     ]
   },
   {
-    title: "Krylov Solvers",
+    title: "Krylov Subspace Solver",
     items: [
-      "Enable Krylov for iterative linear solves. Auto method selection chooses GMRES/Arnoldi for general systems, MINRES/CR for symmetric systems, and CG for positive-definite systems.",
+      "Enable the Krylov subspace solver for iterative linear solves on the full MNA system. Auto method selection chooses GMRES/Arnoldi for general systems, MINRES/CR for symmetric systems, and CG for positive-definite systems.",
       "Manual method selection can override the matrix classifier, including choosing Arnoldi for SPD matrices.",
       "Auto rank resolves after MNA assembly as ceil(0.5 * matrix dimension). Manual rank accepts any positive integer.",
       "For GMRES/Arnoldi the value is the restart or subspace size; for MINRES/CR/CG it is the iteration budget."
+    ]
+  },
+  {
+    title: "Model-Order Reduction",
+    items: [
+      "Enable MOR when only a few output labels matter in a larger analog circuit.",
+      "MOR outputs are separate from Display nodes. The reduced model returns only MOR outputs; Display nodes must be empty or chosen from that MOR output set.",
+      "Auto method uses output-aware Linear Krylov MOR for .ac and linear .tran, and TPWL/POD for nonlinear .tran.",
+      "Auto order uses min(n, max(10, min(120, 4 * (inputs + outputs)))) after MNA assembly.",
+      "Metadata reports mor_order/mor_resolved_order as the reduction budget and mor_basis_size as the actual independent basis size after pruning.",
+      "TPWL/POD is nonlinear transient MOR; purely linear circuits route to Linear Krylov MOR and report that route in metadata.",
+      ".op and .hb are not reduced in this v1; metadata explains that MOR was intentionally bypassed."
     ]
   },
   {

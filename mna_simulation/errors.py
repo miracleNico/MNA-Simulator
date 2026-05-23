@@ -37,7 +37,7 @@ def error_handler(message: str) -> None:
         code = "UNKNOWN"
         msg = message
 
-    if code in {"NETLIST_FATAL", "PARSE_ERROR", "COMPONENT_ERROR", "MODEL_ERROR"}:
+    if code in {"NETLIST_FATAL", "PARSE_ERROR", "COMPONENT_ERROR", "MODEL_ERROR", "MOR_CONFIG"}:
         raise NetlistError(msg, code=code)
 
     if code in {

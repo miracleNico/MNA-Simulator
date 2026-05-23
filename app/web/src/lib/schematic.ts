@@ -28,6 +28,7 @@ export type DeviceType =
 
 export type BasicAnalysisMode = "op" | "tran" | "ac" | "hb" | "dyn";
 export type KrylovMethod = "auto" | "arnoldi_gmres" | "conjugate_residual" | "conjugate_gradient";
+export type MorMethod = "auto" | "linear_krylov" | "tpwl";
 
 export type Rotation = 0 | 90 | 180 | 270;
 
@@ -86,6 +87,16 @@ export type AnalysisState = {
   krylovRank: number;
   /** Auto or explicit Krylov algorithm route. */
   krylovMethod: KrylovMethod;
+  /** If true, backend reduces the model before selected-output solves. */
+  mor: boolean;
+  /** Auto routes .ac/linear .tran to linear Krylov MOR and nonlinear .tran to TPWL. */
+  morMethod: MorMethod;
+  /** Auto uses the backend input/output heuristic; manual sends the integer order. */
+  morOrderMode: "auto" | "manual";
+  /** Manual reduced order. Must be a positive integer. */
+  morOrder: number;
+  /** Output labels kept by MOR, independent of plot display filtering. */
+  morOutputNodes: string[];
 };
 
 /**
@@ -692,6 +703,16 @@ export function buildSchematicPayload(
   }
   if (analysis.probeNodes.length > 0) {
     analysisParams.probe_nodes = analysis.probeNodes;
+  }
+  if (analysis.mor) {
+    analysisParams.use_mor = true;
+    analysisParams.mor_method = analysis.morMethod;
+    analysisParams.mor_order =
+      analysis.morOrderMode === "auto"
+        ? "auto"
+        : Math.max(1, Math.floor(Number(analysis.morOrder) || 1));
+    analysisParams.mor_output_nodes = analysis.morOutputNodes;
+    analysisParams.mor_validate = true;
   }
 
   // Pass the active level's own named junctions (if any) so SUBCKT instances

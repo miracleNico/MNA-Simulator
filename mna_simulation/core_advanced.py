@@ -74,6 +74,10 @@ def run_advanced_analysis(problem: MnaProblem, options: AnalysisOptions) -> Simu
     labels = problem.metadata.get("labels", [])
     metadata = dict(problem.metadata)
     metadata.update({"base_frequency_hz": f0, "harmonics": harmonics})
+    if options.use_mor:
+        from .mor.metadata import disabled_metadata
+
+        metadata.update(disabled_metadata(".hb MOR is not implemented in v1.", options.mor_method))
     if options.use_krylov:
         freq_dim = 2 * harmonics + 1
         choice = describe_krylov_choice(

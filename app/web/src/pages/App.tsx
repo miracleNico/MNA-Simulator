@@ -34,7 +34,12 @@ const defaultAnalysis: AnalysisState = {
   krylov: false,
   krylovRankMode: "auto",
   krylovRank: 80,
-  krylovMethod: "auto"
+  krylovMethod: "auto",
+  mor: false,
+  morMethod: "auto",
+  morOrderMode: "auto",
+  morOrder: 40,
+  morOutputNodes: []
 };
 
 type TileRecord = {
@@ -112,14 +117,28 @@ function isEditableTarget(target: EventTarget | null): boolean {
   return tag === "input" || tag === "textarea" || tag === "select" || target.isContentEditable;
 }
 
-function krylovRequestOptions(analysis: AnalysisState): Record<string, unknown> {
-  const options: Record<string, unknown> = { use_krylov: analysis.krylov };
-  if (!analysis.krylov) return options;
-  options.krylov_rank =
-    analysis.krylovRankMode === "auto"
-      ? "auto"
-      : Math.max(1, Math.floor(Number(analysis.krylovRank) || 1));
-  options.krylov_method = analysis.krylovMethod;
+function simulationRequestOptions(analysis: AnalysisState): Record<string, unknown> {
+  const options: Record<string, unknown> = {
+    use_krylov: analysis.krylov,
+    probe_nodes: analysis.probeNodes
+  };
+  if (analysis.krylov) {
+    options.krylov_rank =
+      analysis.krylovRankMode === "auto"
+        ? "auto"
+        : Math.max(1, Math.floor(Number(analysis.krylovRank) || 1));
+    options.krylov_method = analysis.krylovMethod;
+  }
+  if (analysis.mor) {
+    options.use_mor = true;
+    options.mor_method = analysis.morMethod;
+    options.mor_order =
+      analysis.morOrderMode === "auto"
+        ? "auto"
+        : Math.max(1, Math.floor(Number(analysis.morOrder) || 1));
+    options.mor_output_nodes = analysis.morOutputNodes;
+    options.mor_validate = true;
+  }
   return options;
 }
 
@@ -620,7 +639,7 @@ export function App() {
         body: JSON.stringify({
           netlist_text: netlistMode === "netlist" ? netlistText : "",
           mode: analysis.mode,
-          options: { ...krylovRequestOptions(analysis), output_max_points: MAX_STATIC_PLOT_POINTS },
+          options: { ...simulationRequestOptions(analysis), output_max_points: MAX_STATIC_PLOT_POINTS },
           schematic: schematicPayload ?? undefined
         })
       });
@@ -751,7 +770,7 @@ export function App() {
             window: analysis.dynWindow,
             pin_refs: [{ component_id: target.componentId, pin: target.pin }],
             continuous: true,
-            ...krylovRequestOptions(analysis)
+            ...simulationRequestOptions(analysis)
           })
         );
       };
@@ -846,7 +865,7 @@ export function App() {
           window: analysis.dynWindow,
           nodes: analysis.probeNodes,
           continuous: true,
-          ...krylovRequestOptions(analysis)
+          ...simulationRequestOptions(analysis)
         })
       );
     };
@@ -936,6 +955,21 @@ export function App() {
   );
   const clearProbeNodes = useCallback(() => {
     setAnalysis((cur) => ({ ...cur, probeNodes: [] }));
+  }, []);
+  const addMorOutputNode = useCallback(
+    (label: string) => {
+      setAnalysis((cur) =>
+        cur.morOutputNodes.includes(label) ? cur : { ...cur, morOutputNodes: [...cur.morOutputNodes, label] }
+      );
+    },
+    []
+  );
+  const removeMorOutputNode = useCallback(
+    (label: string) => setAnalysis((cur) => ({ ...cur, morOutputNodes: cur.morOutputNodes.filter((n) => n !== label) })),
+    []
+  );
+  const clearMorOutputNodes = useCallback(() => {
+    setAnalysis((cur) => ({ ...cur, morOutputNodes: [] }));
   }, []);
   const resetAnalysisControls = useCallback(() => {
     setAnalysis({ ...defaultAnalysis });
@@ -1215,6 +1249,9 @@ export function App() {
         onAddProbeNode={addProbeNode}
         onRemoveProbeNode={removeProbeNode}
         onClearProbeNodes={clearProbeNodes}
+        onAddMorOutputNode={addMorOutputNode}
+        onRemoveMorOutputNode={removeMorOutputNode}
+        onClearMorOutputNodes={clearMorOutputNodes}
         onResetAnalysis={resetAnalysisControls}
         levels={levels}
         activeLevelId={activeLevelId}

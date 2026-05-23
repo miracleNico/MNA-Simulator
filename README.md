@@ -19,7 +19,8 @@ The project includes:
 - **SPICE-style transistor flow:** `QNPN`, `QPNP`, `NMOS`, and `PMOS` default to physical Level-1 nonlinear models. `.op` solves bias, `.ac` linearizes around that bias, and `.tran` keeps solving nonlinear I-V equations.
 - **Harmonic balance workflow:** `.hb <harmonics> [time_window]` supports harmonic-domain results and optional reconstructed time-domain waveforms.
 - **Close-tone HB demo:** Frequency Domain Demos includes a nonlinear diode mixer driven by 1 GHz and 1.005 GHz tones, showing the 5 MHz beat/difference product in a high-Q envelope tank that would need 40+ beat periods of picosecond-step transient settling.
-- **Krylov controls:** API/UI requests can use automatic method selection or explicitly choose Arnoldi/GMRES, MINRES/CR, or Conjugate Gradient. Auto Krylov rank resolves after MNA assembly as `ceil(0.5 * matrix_dimension)`.
+- **Krylov subspace solver controls:** API/UI requests can use automatic method selection or explicitly choose Arnoldi/GMRES, MINRES/CR, or Conjugate Gradient for full-system iterative solves. Auto Krylov rank resolves after MNA assembly as `ceil(0.5 * matrix_dimension)`.
+- **Selected-output MOR:** optional model-order reduction keeps only cared outputs. Linear `.ac` and linearized `.tran` use output-aware rational Krylov projection; nonlinear `.tran` can use TPWL/POD with an in-memory ROM cache.
 - **Sparse large-circuit path:** linear transient Krylov runs can use cached SciPy CSR Backward-Euler operators instead of dense conversion on every step.
 - **Functional MOS SRAM demo:** the Large Scale Circuits menu includes a hierarchical 10x10 Level-1 MOS 6T SRAM demo with FUNC-driven write/hold/read timing; the root canvas shows cell instances while the reusable child level holds the transistor cell body.
 - **Large RLC benchmark demo:** the 23x23 distributed RLC mesh produces a 1035-unknown sparse MNA system for Krylov/MINRES benchmarking.
@@ -90,9 +91,14 @@ python -m mna_simulation.cli run path/to/circuit.cir --json
 
 Schematic runs return the generated canonical netlist in response metadata. Simulation options include:
 
-- `use_krylov`: enable the iterative solver path.
+- `use_krylov`: enable the full-system Krylov subspace iterative solver path.
 - `krylov_rank`: `"auto"` or any positive integer.
 - `krylov_method`: `"auto"`, `"arnoldi_gmres"`, `"conjugate_residual"`, or `"conjugate_gradient"`.
+- `use_mor`: enable selected-output model-order reduction.
+- `mor_method`: `"auto"`, `"linear_krylov"`, or `"tpwl"`.
+- `mor_order`: `"auto"` or any positive integer. Auto uses `min(n, max(10, min(120, 4 * (inputs + outputs))))`.
+- `mor_output_nodes`: labels such as `V(out)` or `I(L1)` retained by the reduced model.
+- `mor_validate`: when true, requires `probe_nodes` to be a subset of `mor_output_nodes`.
 - `probe_nodes`: optional labels such as `V(n1)` or `I(L1)` for result filtering.
 - `output_max_points`: optional waveform decimation limit for API responses.
 
@@ -115,6 +121,10 @@ Schematic runs return the generated canonical netlist in response metadata. Simu
 - `.hb [harmonics] [time_window]`
 - `.dyn` frontend websocket stream, executed by the backend as transient analysis.
 
+## MOR Method Notes
+
+For few-output analog LSI work, v1 uses PRIMA-like output-aware rational Krylov projection for linear/passive and `.op`-linearized circuits, because it targets input-output behavior and keeps the projection layer decoupled from the linear-solve backend. Nonlinear transient MOR uses a TPWL/POD cache. TPWL/POD requested on a purely linear circuit is routed to Linear Krylov MOR and reported in metadata. Metadata distinguishes `mor_order` / `mor_resolved_order` (requested reduction budget) from `mor_basis_size` (actual independent basis after pruning). Balanced truncation and SVDMOR/RecMOR remain documented later candidates for heavier global reduction or many-terminal structured interconnects.
+
 ## Schematic Demo Notes
 
 The frontend supports:
@@ -127,7 +137,8 @@ The frontend supports:
 - Top-menu demos, including a BJT 3-stage amplifier built from real subcircuits, a GHz close-tone HB mixer, and Large Scale Circuits presets.
 - Toolbar Help opens the same practical guide stored in `USER_GUIDE.md`.
 - Raw netlist editing in the Visualization panel. Starting an edit asks for confirmation and then clears schematic hierarchy so the request is sent as `netlist_text`.
-- Krylov controls with method override, auto/manual rank, and method-specific wording for restart versus iteration budget.
+- Krylov subspace solver controls with method override, auto/manual rank, and method-specific wording for restart versus iteration budget.
+- MOR controls with method selection including Linear Krylov MOR, auto/manual order, and a separate MOR output-node selector. Display nodes must be empty or contained in the MOR output set.
 - `.op`, `.tran`, `.ac`, `.hb`, and dynamic display/probe visualization.
 
 ## Testing

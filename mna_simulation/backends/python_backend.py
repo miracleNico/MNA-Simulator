@@ -55,6 +55,57 @@ def _coerce_krylov_method(value: object) -> str:
     return aliases[cleaned]
 
 
+def _coerce_mor_method(value: object) -> str:
+    """Return a normalized MOR method selector."""
+
+    if value is None:
+        return "auto"
+    cleaned = str(value).strip().lower()
+    aliases = {
+        "": "auto",
+        "auto": "auto",
+        "linear": "linear_krylov",
+        "linear_krylov": "linear_krylov",
+        "krylov": "linear_krylov",
+        "rational_krylov": "linear_krylov",
+        "prima": "linear_krylov",
+        "tpwl": "tpwl",
+        "pod": "tpwl",
+        "nonlinear": "tpwl",
+    }
+    if cleaned not in aliases:
+        raise ValueError(f"Unknown MOR method '{value}'.")
+    return aliases[cleaned]
+
+
+def _coerce_mor_order(value: object) -> int | str:
+    """Return ``auto`` or a positive integer reduced order."""
+
+    if value is None:
+        return "auto"
+    if isinstance(value, str):
+        cleaned = value.strip().lower()
+        if cleaned == "auto" or cleaned == "":
+            return "auto"
+        value = cleaned
+    order = int(value)
+    if order < 1:
+        raise ValueError("mor_order must be 'auto' or a positive integer.")
+    return order
+
+
+def _coerce_label_list(value: object) -> list[str]:
+    """Normalize a UI/API label payload into a list of strings."""
+
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [part.strip() for part in value.split(",") if part.strip()]
+    if isinstance(value, (list, tuple, set)):
+        return [str(part).strip() for part in value if str(part).strip()]
+    return [str(value).strip()] if str(value).strip() else []
+
+
 class PythonBackend:
     """Default backend using the extracted Python numerical stack."""
 
@@ -65,6 +116,7 @@ class PythonBackend:
             supports_harmonic_balance=True,
             supports_sparse_linear_solver=True,
             supports_krylov_linear_solver=True,
+            supports_model_order_reduction=True,
             supports_cpp_acceleration=False,
         )
 
@@ -93,6 +145,9 @@ class PythonBackend:
         else:
             krylov_rank = "auto"
         krylov_method = _coerce_krylov_method(option_values.get("krylov_method", option_values.get("krylov_algorithm", "auto")))
+        use_mor = bool(option_values.get("use_mor", option_values.get("mor", False)))
+        mor_method = _coerce_mor_method(option_values.get("mor_method", "auto"))
+        mor_order = _coerce_mor_order(option_values.get("mor_order", "auto"))
 
         return AnalysisOptions(
             mode=effective_mode or directive.mode,
@@ -108,12 +163,18 @@ class PythonBackend:
             hb_harmonics=option_values.get("harmonics"),
             hb_time_window=option_values.get("time_window"),
             init_condition=option_values.get("init_condition"),
+            probe_nodes=_coerce_label_list(option_values.get("probe_nodes")),
             use_krylov=use_krylov,
             krylov_tol=float(option_values.get("krylov_tol", 1e-9)),
             krylov_max_iter=int(option_values.get("krylov_max_iter", 2000)),
             krylov_restart=int(option_values.get("krylov_restart", 80)),
             krylov_rank=krylov_rank,
             krylov_method=krylov_method,
+            use_mor=use_mor,
+            mor_method=mor_method,
+            mor_order=mor_order,
+            mor_output_nodes=_coerce_label_list(option_values.get("mor_output_nodes")),
+            mor_validate=bool(option_values.get("mor_validate", True)),
         )
 
     def run(self, circuit: CircuitIR, options: AnalysisOptions) -> SimulationResult:

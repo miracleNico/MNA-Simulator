@@ -21,6 +21,9 @@ type Props = {
   onAddProbeNode: (label: string) => void;
   onRemoveProbeNode: (label: string) => void;
   onClearProbeNodes: () => void;
+  onAddMorOutputNode: (label: string) => void;
+  onRemoveMorOutputNode: (label: string) => void;
+  onClearMorOutputNodes: () => void;
   onResetAnalysis: () => void;
 
   levels: SchematicLevel[];
@@ -54,6 +57,9 @@ export function LeftPane(props: Props) {
           onAddProbeNode={props.onAddProbeNode}
           onRemoveProbeNode={props.onRemoveProbeNode}
           onClearProbeNodes={props.onClearProbeNodes}
+          onAddMorOutputNode={props.onAddMorOutputNode}
+          onRemoveMorOutputNode={props.onRemoveMorOutputNode}
+          onClearMorOutputNodes={props.onClearMorOutputNodes}
           onResetAnalysis={props.onResetAnalysis}
           onRun={props.onRun}
           running={props.running}
@@ -219,6 +225,9 @@ function SimulationControls({
   onAddProbeNode,
   onRemoveProbeNode,
   onClearProbeNodes,
+  onAddMorOutputNode,
+  onRemoveMorOutputNode,
+  onClearMorOutputNodes,
   onResetAnalysis,
   onRun,
   running
@@ -229,6 +238,9 @@ function SimulationControls({
   onAddProbeNode: (label: string) => void;
   onRemoveProbeNode: (label: string) => void;
   onClearProbeNodes: () => void;
+  onAddMorOutputNode: (label: string) => void;
+  onRemoveMorOutputNode: (label: string) => void;
+  onClearMorOutputNodes: () => void;
   onResetAnalysis: () => void;
   onRun: () => void;
   running: boolean;
@@ -376,8 +388,8 @@ function SimulationControls({
 
       <div className="controlBlock">
         <div className="formRow">
-          <label title="Enable an iterative Krylov linear solve path. Auto chooses by matrix class; manual algorithm selection overrides the class.">
-            krylov
+          <label title="Enable a Krylov subspace iterative solver for the full MNA system. Auto chooses by matrix class; manual algorithm selection overrides the class.">
+            Krylov subspace solver
           </label>
           <input
             type="checkbox"
@@ -434,7 +446,121 @@ function SimulationControls({
         <div className="hintText" style={{ marginTop: 4 }}>
           {analysis.krylov
             ? `${krylovHint} Auto rank resolves to ceil(50% of matrix dimension).`
-            : "Krylov disabled: simulations use the regular direct solver path."}
+            : "Krylov subspace solver disabled: simulations use the regular direct solver path."}
+        </div>
+      </div>
+
+      <div className="controlDivider" />
+
+      <div className="controlBlock">
+        <div className="formRow">
+          <label title="Enable model-order reduction for a few selected outputs.">
+            MOR
+          </label>
+          <input
+            type="checkbox"
+            checked={analysis.mor}
+            onChange={(e) => onAnalysisChange({ mor: e.target.checked })}
+          />
+        </div>
+        {analysis.mor ? (
+          <>
+            <div className="formRow">
+              <label>method</label>
+              <select
+                className="select"
+                value={analysis.morMethod}
+                onChange={(e) => onAnalysisChange({ morMethod: e.target.value as AnalysisState["morMethod"] })}
+              >
+                <option value="auto">Auto</option>
+                <option value="linear_krylov">Linear Krylov MOR</option>
+                <option value="tpwl">TPWL / POD</option>
+              </select>
+            </div>
+            <div className="formRow">
+              <label title="Auto order uses min(n, max(10, min(120, 4*(inputs+outputs)))).">
+                order
+              </label>
+              <select
+                className="select"
+                value={analysis.morOrderMode}
+                onChange={(e) => onAnalysisChange({ morOrderMode: e.target.value as AnalysisState["morOrderMode"] })}
+              >
+                <option value="auto">Auto</option>
+                <option value="manual">Manual</option>
+              </select>
+            </div>
+            {analysis.morOrderMode === "manual" ? (
+              <div className="formRow">
+                <label>basis size</label>
+                <input
+                  className="input"
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={analysis.morOrder}
+                  onChange={(e) => {
+                    const next = Math.max(1, Math.floor(Number(e.target.value) || 1));
+                    onAnalysisChange({ morOrder: next });
+                  }}
+                />
+              </div>
+            ) : null}
+            <div className="formRow" style={{ flexDirection: "column", alignItems: "stretch" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                <label style={{ marginBottom: 0, flex: 1 }}>MOR outputs</label>
+                <button
+                  className="ghostBtn"
+                  type="button"
+                  onClick={onClearMorOutputNodes}
+                  disabled={analysis.morOutputNodes.length === 0}
+                >
+                  Clear
+                </button>
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap" }}>
+                {analysis.morOutputNodes.length === 0 ? (
+                  <span className="hintText" style={{ marginLeft: 0 }}>
+                    Pick cared outputs.
+                  </span>
+                ) : (
+                  analysis.morOutputNodes.map((n) => (
+                    <span key={n} className="tag">
+                      {n}
+                      <button onClick={() => onRemoveMorOutputNode(n)} aria-label="Remove">
+                        ×
+                      </button>
+                    </span>
+                  ))
+                )}
+              </div>
+              <select
+                className="select"
+                defaultValue=""
+                onChange={(e) => {
+                  if (e.target.value) onAddMorOutputNode(e.target.value);
+                  e.currentTarget.value = "";
+                }}
+                style={{ marginTop: 6 }}
+              >
+                <option value="" disabled>
+                  Add output…
+                </option>
+                {availableNodes
+                  .filter((n) => !analysis.morOutputNodes.includes(n))
+                  .map((n) => (
+                    <option key={n} value={n}>
+                      {n}
+                    </option>
+                  ))}
+              </select>
+            </div>
+          </>
+        ) : null}
+        <div className="hintText" style={{ marginTop: 4 }}>
+          {analysis.mor
+            ? "Reduced results contain only MOR outputs. Display nodes must be empty or a subset of those outputs."
+            : "MOR disabled: full MNA state is solved and available."}
         </div>
       </div>
 

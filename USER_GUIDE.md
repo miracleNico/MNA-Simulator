@@ -38,14 +38,24 @@ This guide explains the normal web-app workflow for drawing circuits, running an
 - Dynamic display uses the toolbar play button and streams selected nodes into live tiles.
 - Probe mode lets you click a pin to open a live dynamic tile for that net.
 
-## Krylov Solvers
+## Krylov Subspace Solver
 
-- Enable Krylov for iterative linear solves.
+- Enable the Krylov subspace solver for iterative linear solves on the full MNA system.
 - Auto method selection chooses GMRES/Arnoldi for general systems, MINRES/CR for symmetric systems, and CG for positive-definite systems.
 - Manual method selection can override the matrix classifier, including choosing Arnoldi for SPD matrices.
 - Auto rank resolves after MNA assembly as `ceil(0.5 * matrix dimension)`.
 - Manual rank accepts any positive integer.
 - For GMRES/Arnoldi the value is the restart or subspace size; for MINRES/CR/CG it is the iteration budget.
+
+## Model-Order Reduction
+
+- Enable MOR when only a few output labels matter in a larger analog circuit.
+- MOR outputs are separate from Display nodes. The reduced model returns only MOR outputs; Display nodes must be empty or chosen from that MOR output set.
+- Auto method uses output-aware Linear Krylov MOR for `.ac` and linear `.tran`, and TPWL/POD for nonlinear `.tran`.
+- Auto order uses the generated MNA dimension plus input/output count: `min(n, max(10, min(120, 4 * (inputs + outputs))))`.
+- Result metadata reports both `mor_order` / `mor_resolved_order` as the requested reduction budget and `mor_basis_size` as the actual independent basis size after pruning.
+- TPWL/POD is a nonlinear transient MOR path. If it is requested on a purely linear circuit, the backend routes that run to Linear Krylov MOR and reports the route in metadata.
+- `.op` and `.hb` are not reduced in this v1; they report metadata explaining that MOR was intentionally bypassed.
 
 ## Raw Netlist Mode
 
@@ -65,4 +75,4 @@ This guide explains the normal web-app workflow for drawing circuits, running an
 - If a waveform is empty, check that the selected Display nodes exist in the generated netlist labels.
 - If a transistor amplifier has no gain, run `.op` first and confirm the device region and DC bias are sensible.
 - If a hierarchy error mentions an invalid pin, check that the parent `SUBCKT` instance pins match the child entity's exported `NODE` names.
-- If a Krylov run is slower on a small circuit, use a larger sparse circuit such as the Large RLC Mesh demo; dense direct solve is often faster for tiny matrices.
+- If a Krylov subspace solver run is slower on a small circuit, use a larger sparse circuit such as the Large RLC Mesh demo; dense direct solve is often faster for tiny matrices.

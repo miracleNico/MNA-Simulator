@@ -10,8 +10,9 @@ This document describes the project-authored source, config, docs, and tests. It
 4. The schematic pipeline validates hierarchy, flattens `SUBCKT` instances, forms nets, emits canonical netlist text, and parses it back into `CircuitIR`.
 5. `mna_simulation/backends/python_backend.py` builds `AnalysisOptions`.
 6. `mna_simulation/netlist.py` and `mna_simulation/mna_builder.py` produce the MNA problem.
-7. `mna_simulation/solvers.py` executes `.op`, `.tran`, `.ac`, or `.hb`.
-8. Results return through the API service and are plotted by the frontend.
+7. Optional selected-output MOR in `mna_simulation/mor/` reduces `.ac` and `.tran` problems when requested.
+8. `mna_simulation/solvers.py` executes `.op`, `.tran`, `.ac`, or `.hb`.
+9. Results return through the API service and are plotted by the frontend.
 
 ## Root Files
 
@@ -21,7 +22,7 @@ This document describes the project-authored source, config, docs, and tests. It
 
 ### `USER_GUIDE.md`
 - User-facing guide for the web app.
-- Mirrors the main topics exposed by the in-app Help dialog: demos, schematic editing, hierarchy, analyses, result display, Krylov controls, raw netlist mode, and troubleshooting.
+- Mirrors the main topics exposed by the in-app Help dialog: demos, schematic editing, hierarchy, analyses, result display, Krylov subspace solver controls, raw netlist mode, and troubleshooting.
 
 ### `STRUCT.md`
 - This file-by-file architecture reference.
@@ -75,11 +76,20 @@ This document describes the project-authored source, config, docs, and tests. It
 ### `mna_simulation/core_basic.py`
 - Facade for `.op`, `.tran`, `.ac`, and matrix inspection.
 - Adds solver metadata for Krylov method, requested method, matrix dimension, sparse density, iteration count, rank mode, and fallback status.
+- Routes selected-output MOR for `.ac`, linear `.tran`, and nonlinear TPWL `.tran`; `.op` and matrix inspection report MOR as intentionally unused.
 
 ### `mna_simulation/core_advanced.py`
 - Facade for `.hb`.
 - Infers base frequency from sinusoidal sources and optionally reconstructs time-domain waveforms from harmonic-balance coefficients.
 - Passes Krylov rank/method options through harmonic-balance linear solves.
+- Reports MOR as intentionally unused for `.hb` v1.
+
+### `mna_simulation/mor/`
+- Decoupled model-order reduction package.
+- `selectors.py` maps labels such as `V(out)` and `I(L1)` to selector matrices and validates display-node subsets.
+- `metadata.py` resolves automatic MOR order and emits compression/cache metadata.
+- `linear.py` implements output-aware rational Krylov/PRIMA-like projection for linear and `.op`-linearized `.ac` plus linear transient. Large sparse linear transients can validate selected outputs against the sparse full-order Krylov path and fall back when the reduced model underfits or becomes unstable.
+- `tpwl.py` implements TPWL/POD nonlinear transient MOR with an in-memory LRU cache.
 
 ### `mna_simulation/schematic_pipeline.py`
 - Backend-owned schematic graph to netlist conversion.
@@ -99,7 +109,7 @@ This document describes the project-authored source, config, docs, and tests. It
 - Shared contracts for parser, builder, solver, service, and UI.
 - Contains analysis enums, IR dataclasses, result dataclasses, API Pydantic models, and schematic graph models.
 - `SchematicComponent` includes hierarchy metadata, arbitrary device metadata, and transistor defaults.
-- `AnalysisOptions` carries `use_krylov`, `krylov_rank`, and `krylov_method`.
+- `AnalysisOptions` carries Krylov options plus selected-output MOR options (`use_mor`, `mor_method`, `mor_order`, `mor_output_nodes`, and `mor_validate`).
 
 ### `mna_simulation/api/service.py`
 - Orchestration entrypoint used by CLI and FastAPI.
@@ -113,6 +123,7 @@ This document describes the project-authored source, config, docs, and tests. It
 - Active backend adapter.
 - Parses netlists, builds options from directives, runs analysis, and exposes capability flags.
 - Coerces Krylov rank/method request options, including aliases such as `arnoldi`, `gmres`, `minres`, and `cg`.
+- Coerces MOR method/order/output options and advertises model-order reduction capability.
 
 ### `mna_simulation/backends/cpp_backend.py`
 - Placeholder adapter for a future C++ core.
@@ -159,7 +170,7 @@ This document describes the project-authored source, config, docs, and tests. It
 ### `app/web/src/lib/schematic.ts`
 - Frontend schematic model and payload conversion.
 - Defines device types, component/wire/level types, pin layouts, geometry helpers, net-label computation, and `buildSchematicPayload()`.
-- Defines analysis state for Krylov enablement, method override, and auto/manual rank.
+- Defines analysis state for Krylov enablement plus MOR enablement, method, auto/manual order, and separate MOR outputs.
 - Expands frontend `NODE` markers into backend `port_<name>` junctions.
 - Repairs stale `SUBCKT` wire endpoint names before sending payloads.
 
@@ -191,7 +202,8 @@ This document describes the project-authored source, config, docs, and tests. It
 ### `app/web/src/components/LeftPane.tsx`
 - Simulation controls, hierarchy tree, library list, and property editor.
 - Supports `SUBCKT` displayed/entity name, node count, editable pin names, transistor small-signal fields, and display-node controls.
-- Exposes Krylov algorithm selection, method-specific manual value wording, display-node clear, and simulation-control reset.
+- Exposes Krylov subspace solver algorithm selection, method-specific manual value wording, display-node clear, and simulation-control reset.
+- Exposes MOR controls with method selection including Linear Krylov MOR, auto/manual order, and output-node selection separate from display nodes.
 - Contains the editable netlist panel. Editing asks for confirmation, clears schematic hierarchy, and switches runs to raw `netlist_text`.
 
 ### `app/web/src/components/SchematicCanvas.tsx`
@@ -211,6 +223,7 @@ This document describes the project-authored source, config, docs, and tests. It
 - Rewrites stale `SUBCKT` wire endpoints when pins are renamed.
 - Tracks schematic mode versus raw netlist mode and sends the matching API payload.
 - Passes Krylov method/rank options through static simulation and dynamic websocket requests.
+- Passes MOR options through static simulation requests and keeps display-node filtering independent from MOR output selection.
 
 ### `app/web/src/components/AnalysisPanel.tsx`
 - Older/legacy panel component retained in the tree.
@@ -245,6 +258,10 @@ This document describes the project-authored source, config, docs, and tests. It
 - Level-1 MOS and SRAM behavior tests.
 - Verifies inverter convergence, selected 6T cell write/hold/read behavior, and full 10x10 SRAM transient execution.
 
+### `tests/test_mor.py`
+- Selected-output MOR tests.
+- Covers output selectors, auto/manual MOR order, backend option parsing, linear AC/transient accuracy, Level-1 `.op` linearization before MOR, TPWL cache reuse, display subset validation, and `.op`/`.hb` fallback metadata.
+
 ## Benchmarks: `benchmarks/`
 
 ### `benchmarks/benchmark_basic.py`
@@ -266,4 +283,6 @@ This document describes the project-authored source, config, docs, and tests. It
 7. `app/server/main.py`
 8. `app/web/src/lib/schematic.ts`
 9. `app/web/src/pages/App.tsx`
-10. `app/web/src/components/SchematicCanvas.tsx`
+10. `mna_simulation/mor/linear.py`
+11. `mna_simulation/mor/tpwl.py`
+12. `app/web/src/components/SchematicCanvas.tsx`

@@ -6,12 +6,14 @@ import numpy as np
 
 from .api.contracts import ComponentRecord
 from .api.contracts import AnalysisMode, AnalysisOptions, MnaProblem, SimulationResult
+from .errors import error_handler
 from .mna_builder import build_mna_problem
 from .solvers import (
     _level1_bjt_currents_and_derivatives,
     _level1_mos_current_and_derivatives,
     compile_time_source_func,
     describe_krylov_choice,
+    is_nonlinear,
     solve_ac,
     solve_dc_nr,
     solve_transient,
@@ -297,6 +299,11 @@ def _device_operating_points(problem: MnaProblem, solution: np.ndarray) -> list[
     return points
 
 
+def _has_nonlinear_terms(problem: MnaProblem) -> bool:
+    solver_f_str = problem.solver_f_str if problem.solver_f_str is not None else problem.f_str
+    return is_nonlinear(solver_f_str) or bool(problem.level1_mos_devices) or bool(problem.level1_bjt_devices)
+
+
 def run_basic_analysis(problem: MnaProblem, options: AnalysisOptions) -> SimulationResult:
     """Run one of the basic analyses on a prebuilt MNA problem."""
 
@@ -308,6 +315,10 @@ def run_basic_analysis(problem: MnaProblem, options: AnalysisOptions) -> Simulat
 
     if options.mode == AnalysisMode.SHOW_MATRIX:
         metadata = _result_metadata(problem, options, krylov_stats)
+        if options.use_mor:
+            from .mor.metadata import disabled_metadata
+
+            metadata.update(disabled_metadata(".show_matrix requires the full MNA system.", options.mor_method))
         return SimulationResult(
             mode=options.mode,
             status="ok",
@@ -338,6 +349,10 @@ def run_basic_analysis(problem: MnaProblem, options: AnalysisOptions) -> Simulat
             **linear_kwargs,
         )
         metadata = _result_metadata(problem, options, krylov_stats)
+        if options.use_mor:
+            from .mor.metadata import disabled_metadata
+
+            metadata.update(disabled_metadata(".op solves and reports the full state in MOR v1.", options.mor_method))
         device_points = _device_operating_points(problem, solution)
         if device_points:
             metadata["device_operating_points"] = device_points
@@ -358,6 +373,65 @@ def run_basic_analysis(problem: MnaProblem, options: AnalysisOptions) -> Simulat
         )
 
     if options.mode == AnalysisMode.TRAN:
+        if options.use_mor:
+            if _has_nonlinear_terms(problem):
+                if options.mor_method == "linear_krylov":
+                    error_handler("MOR_CONFIG: linear_krylov MOR cannot be used for nonlinear transient; choose auto or tpwl.")
+                from .mor.tpwl import solve_transient_tpwl
+
+                waveform, mor_metadata = solve_transient_tpwl(
+                    problem,
+                    t_stop=options.tran_stop or 0.1,
+                    t_step=options.tran_step or 1e-5,
+                    mor_output_nodes=options.mor_output_nodes,
+                    mor_order=options.mor_order,
+                    requested_method=options.mor_method,
+                    validate=options.mor_validate,
+                    probe_nodes=options.probe_nodes,
+                    max_iter=options.max_iter,
+                    v_tol=options.v_tol,
+                    f_tol=options.f_tol,
+                )
+                metadata = _result_metadata(problem, options, krylov_stats)
+                metadata.update(mor_metadata)
+                return SimulationResult(
+                    mode=options.mode,
+                    status="ok",
+                    waveform=waveform,
+                    labels=waveform.labels,
+                    metadata=metadata,
+                )
+            from .mor.linear import solve_transient_mor
+
+            init_cond = options.init_condition if not isinstance(options.init_condition, str) else None
+            waveform, mor_metadata = solve_transient_mor(
+                problem,
+                t_stop=options.tran_stop or 0.1,
+                t_step=options.tran_step or 1e-5,
+                mor_output_nodes=options.mor_output_nodes,
+                mor_order=options.mor_order,
+                requested_method=options.mor_method,
+                validate=options.mor_validate,
+                probe_nodes=options.probe_nodes,
+                max_iter=options.max_iter,
+                v_tol=options.v_tol,
+                f_tol=options.f_tol,
+                init_cond=init_cond,
+                linear_kwargs=linear_kwargs,
+            )
+            if options.mor_method == "tpwl":
+                mor_metadata["mor_fallback_reason"] = "TPWL/POD is nonlinear transient MOR; linear circuits route to Linear Krylov MOR."
+            metadata = _result_metadata(problem, options, krylov_stats)
+            metadata.update(mor_metadata)
+            metadata["op_used"] = False
+            return SimulationResult(
+                mode=options.mode,
+                status="ok",
+                waveform=waveform,
+                labels=waveform.labels,
+                metadata=metadata,
+            )
+
         init_cond = options.init_condition if not isinstance(options.init_condition, str) else None
         op_used = False
         op_solution: np.ndarray | None = None
@@ -404,6 +478,42 @@ def run_basic_analysis(problem: MnaProblem, options: AnalysisOptions) -> Simulat
         )
 
     if options.mode == AnalysisMode.AC:
+        if options.use_mor:
+            if options.mor_method == "tpwl":
+                error_handler("MOR_CONFIG: tpwl MOR is transient-only; use auto or linear_krylov for .ac.")
+            from .mor.linear import solve_ac_mor
+
+            spectrum = solve_ac_mor(
+                problem,
+                f_start=options.ac_start or 1.0,
+                f_stop=options.ac_stop or 1e6,
+                points=options.ac_points or 100,
+                mor_output_nodes=options.mor_output_nodes,
+                mor_order=options.mor_order,
+                requested_method=options.mor_method,
+                validate=options.mor_validate,
+                probe_nodes=options.probe_nodes,
+                max_iter=options.max_iter,
+                v_tol=options.v_tol,
+                f_tol=options.f_tol,
+                linear_kwargs=linear_kwargs,
+            )
+            metadata = _result_metadata(problem, options, krylov_stats)
+            metadata.update(spectrum.metadata)
+            operating_point = spectrum.metadata.get("operating_point")
+            if isinstance(operating_point, dict) and operating_point.get("values") is not None:
+                op_solution = np.asarray(operating_point["values"], dtype=float).reshape(-1, 1)
+                device_points = _device_operating_points(problem, op_solution)
+                if device_points:
+                    metadata["device_operating_points"] = device_points
+            return SimulationResult(
+                mode=options.mode,
+                status="ok",
+                spectrum=spectrum,
+                labels=spectrum.labels,
+                metadata=metadata,
+            )
+
         spectrum = solve_ac(
             problem,
             f_start=options.ac_start or 1.0,

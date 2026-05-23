@@ -72,12 +72,18 @@ class AnalysisOptions:
     hb_harmonics: int | None = None
     hb_time_window: float | None = None
     init_condition: np.ndarray | str | None = None
+    probe_nodes: list[str] = field(default_factory=list)
     use_krylov: bool = False
     krylov_tol: float = 1e-9
     krylov_max_iter: int = 2000
     krylov_restart: int = 80
     krylov_rank: int | str | None = "auto"
     krylov_method: str = "auto"
+    use_mor: bool = False
+    mor_method: str = "auto"
+    mor_order: int | str | None = "auto"
+    mor_output_nodes: list[str] = field(default_factory=list)
+    mor_validate: bool = True
 
 
 @dataclass(slots=True)
@@ -154,6 +160,7 @@ class BackendCapabilities:
     supports_harmonic_balance: bool = True
     supports_sparse_linear_solver: bool = False
     supports_krylov_linear_solver: bool = False
+    supports_model_order_reduction: bool = False
     supports_cpp_acceleration: bool = False
 
 

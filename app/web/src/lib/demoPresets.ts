@@ -24,7 +24,12 @@ const defaultAnalysis: AnalysisState = {
   krylov: false,
   krylovRankMode: "auto",
   krylovRank: 80,
-  krylovMethod: "auto"
+  krylovMethod: "auto",
+  mor: false,
+  morMethod: "auto",
+  morOrderMode: "auto",
+  morOrder: 40,
+  morOutputNodes: []
 };
 
 function cloneAnalysis(overrides: Partial<AnalysisState>): AnalysisState {
