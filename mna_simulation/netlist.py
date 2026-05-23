@@ -185,7 +185,7 @@ class Component:
             if len(parts) != 6:
                 error_handler(f"COMPONENT_ERROR: '{component.name}' expected 6 parts, got {len(parts)}")
             component.value = parts[4]
-            component.value2 = parts[5]
+            component.value2 = parts[5].strip()
         else:
             error_handler(
                 f"COMPONENT_ERROR: '{component.name}' has invalid subtype '{component.subtype}'."
@@ -270,6 +270,8 @@ class Component:
 
     @classmethod
     def _parse_mos(cls, component: "Component", parts: list[str]) -> None:
+        # Physical Level-1 MOS:
+        #   M1 drain gate source NMOS LEVEL1 beta vth lambda cgs cgd
         # Small-signal MOS:
         #   M1 drain gate source NMOS gm ro cgs cgd [gmb cbs cbd]
         #   M1 drain gate source gm ro cgs cgd      (defaults to NMOS)
@@ -280,6 +282,17 @@ class Component:
         component.node2 = parts[3]
         if component.node1 == component.node2:
             error_handler(f"COMPONENT_ERROR: '{component.name}' drain and source must be different.")
+        if len(parts) == 11 and parts[4].upper() in {"NMOS", "PMOS"} and parts[5].upper() == "LEVEL1":
+            mos_type = parts[4].upper()
+            component.type = mos_type
+            component.subtype = mos_type
+            component.metadata["model"] = "level1"
+            component.value = parts[6]
+            component.value2 = parts[7]
+            component.value3 = parts[8]
+            component.metadata["cgs"] = parts[9]
+            component.metadata["cgd"] = parts[10]
+            return
         if len(parts) >= 9 and parts[4].upper() in {"NMOS", "PMOS"}:
             mos_type = parts[4].upper()
             component.type = mos_type
@@ -394,15 +407,25 @@ class Component:
             return True
 
         if self.type in {"NMOS", "PMOS"}:
-            for label, value in (
-                ("gm", self.value),
-                ("ro", self.value2),
-                ("cgs", self.value3),
-                ("cgd", self.metadata.get("cgd")),
-                ("gmb", self.metadata.get("gmb")),
-                ("cbs", self.metadata.get("cbs")),
-                ("cbd", self.metadata.get("cbd")),
-            ):
+            if self.metadata.get("model") == "level1":
+                values = (
+                    ("beta", self.value),
+                    ("vth", self.value2),
+                    ("lambda", self.value3),
+                    ("cgs", self.metadata.get("cgs")),
+                    ("cgd", self.metadata.get("cgd")),
+                )
+            else:
+                values = (
+                    ("gm", self.value),
+                    ("ro", self.value2),
+                    ("cgs", self.value3),
+                    ("cgd", self.metadata.get("cgd")),
+                    ("gmb", self.metadata.get("gmb")),
+                    ("cbs", self.metadata.get("cbs")),
+                    ("cbd", self.metadata.get("cbd")),
+                )
+            for label, value in values:
                 if value is None or not self.DEPENDENT_VAL_PATTERN.match(value):
                     error_handler(f"NETLIST_FATAL: '{self.name}' has invalid {label} value '{value}'.")
             return True
@@ -521,6 +544,15 @@ class Netlist:
         )
 
 
+def _split_component_line(line: str) -> list[str]:
+    """Split a component line while preserving FUNC expressions as one tail."""
+
+    parts = line.split(maxsplit=5)
+    if len(parts) >= 4 and parts[3].upper() == "FUNC":
+        return parts
+    return line.split()
+
+
 def parse_directive(line: str) -> DirectiveRecord:
     """Parse a single simulator directive line."""
 
@@ -579,7 +611,7 @@ def parse_netlist_text(netlist_text: str) -> CircuitIR:
             directives.append(parse_directive(line))
             continue
 
-        parts = line.split()
+        parts = _split_component_line(line)
         component = Component.from_parts(parts)
         netlist.add_component(component)
 

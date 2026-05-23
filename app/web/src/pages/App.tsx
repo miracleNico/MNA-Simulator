@@ -4,7 +4,7 @@ import { LeftPane } from "../components/LeftPane";
 import { PlotTile } from "../components/PlotTile";
 import { ClipboardData, ProbeTarget, SchematicCanvas } from "../components/SchematicCanvas";
 import { Toolbar } from "../components/Toolbar";
-import { HIDDEN_DEMO_PRESETS, SCHEMATIC_PRESETS } from "../lib/demoPresets";
+import { DEMO_MENU_GROUPS, HIDDEN_DEMO_PRESETS, SCHEMATIC_PRESETS } from "../lib/demoPresets";
 import { PlotData } from "../lib/plot";
 import {
   AnalysisState,
@@ -29,7 +29,10 @@ const defaultAnalysis: AnalysisState = {
   dynSpeed: "1m",
   dynWindow: "5m",
   probeNodes: [],
-  continuous: false
+  krylov: false,
+  krylovRankMode: "auto",
+  krylovRank: 80,
+  krylovMethod: "auto"
 };
 
 type TileRecord = {
@@ -56,9 +59,22 @@ const LIBRARY_ITEMS: DeviceType[] = [
   "QNPN", "QPNP", "NMOS", "PMOS",
   "VCVS", "VCCS", "CCCS", "CCVS", "SUBCKT", "LABEL", "NODE"
 ];
+const MAX_STATIC_PLOT_POINTS = 6000;
+const MAX_RESPONSE_PREVIEW_VALUES = 20000;
 
 function genId(prefix: string): string {
   return `${prefix}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
+function krylovRequestOptions(analysis: AnalysisState): Record<string, unknown> {
+  const options: Record<string, unknown> = { use_krylov: analysis.krylov };
+  if (!analysis.krylov) return options;
+  options.krylov_rank =
+    analysis.krylovRankMode === "auto"
+      ? "auto"
+      : Math.max(1, Math.floor(Number(analysis.krylovRank) || 1));
+  options.krylov_method = analysis.krylovMethod;
+  return options;
 }
 
 function samePins(left: string[], right: string[]): boolean {
@@ -208,11 +224,74 @@ export function App() {
   const [status, setStatus] = useState<"idle" | "ok" | "error" | "running">("idle");
   const [statusMsg, setStatusMsg] = useState("");
   const [generatedNetlist, setGeneratedNetlist] = useState<string>("");
+  const [netlistMode, setNetlistMode] = useState<"schematic" | "netlist">("schematic");
+  const [netlistText, setNetlistText] = useState<string>("");
   const [responsePreview, setResponsePreview] = useState<string>("");
   const [tiles, setTiles] = useState<TileRecord[]>([]);
   const [clipboard, setClipboard] = useState<ClipboardData | null>(null);
   const [demoOpen, setDemoOpen] = useState(false);
+  const [statusElapsedMs, setStatusElapsedMs] = useState(0);
+  const [statusIterations, setStatusIterations] = useState(0);
   const tileCounterRef = useRef(1);
+  const statusStartRef = useRef<number | null>(null);
+  const statusTimerRef = useRef<number | null>(null);
+  const statusIterationsRef = useRef(0);
+  const statusIterationPaintRef = useRef(0);
+  const activeDynamicTilesRef = useRef<Set<string>>(new Set());
+
+  const stopStatusTimer = useCallback(() => {
+    if (statusStartRef.current !== null) {
+      setStatusElapsedMs(performance.now() - statusStartRef.current);
+    }
+    if (statusTimerRef.current !== null) {
+      window.clearInterval(statusTimerRef.current);
+      statusTimerRef.current = null;
+    }
+    statusStartRef.current = null;
+  }, []);
+
+  const startStatusTimer = useCallback(() => {
+    stopStatusTimer();
+    statusStartRef.current = performance.now();
+    statusIterationsRef.current = 0;
+    statusIterationPaintRef.current = 0;
+    setStatusElapsedMs(0);
+    setStatusIterations(0);
+    statusTimerRef.current = window.setInterval(() => {
+      if (statusStartRef.current !== null) {
+        setStatusElapsedMs(performance.now() - statusStartRef.current);
+      }
+    }, 250);
+  }, [stopStatusTimer]);
+
+  const setStatusIterationCount = useCallback((count: number) => {
+    statusIterationsRef.current = Math.max(0, Math.floor(count));
+    setStatusIterations(statusIterationsRef.current);
+  }, []);
+
+  const bumpStatusIteration = useCallback(() => {
+    statusIterationsRef.current += 1;
+    const now = performance.now();
+    if (now - statusIterationPaintRef.current > 250) {
+      statusIterationPaintRef.current = now;
+      setStatusIterations(statusIterationsRef.current);
+    }
+  }, []);
+
+  const beginDynamicMetrics = useCallback((tileId: string) => {
+    activeDynamicTilesRef.current.add(tileId);
+    startStatusTimer();
+  }, [startStatusTimer]);
+
+  const endDynamicMetrics = useCallback((tileId: string) => {
+    activeDynamicTilesRef.current.delete(tileId);
+    setStatusIterationCount(statusIterationsRef.current);
+    if (activeDynamicTilesRef.current.size === 0) {
+      stopStatusTimer();
+    }
+  }, [setStatusIterationCount, stopStatusTimer]);
+
+  useEffect(() => () => stopStatusTimer(), [stopStatusTimer]);
 
   /* -------------- Derived helpers -------------- */
 
@@ -233,6 +312,39 @@ export function App() {
     return [...lines, modeLine, ".end"].join("\n");
   }, [activeLevel.components, analysis]);
 
+  const handleNetlistTextChange = useCallback(
+    (nextText: string): boolean => {
+      if (netlistMode !== "netlist") {
+        const ok = window.confirm(
+          "Editing the netlist will clear the current schematic hierarchy and switch this workspace to raw netlist mode. Continue?"
+        );
+        if (!ok) return false;
+        setLevels([
+          {
+            id: "root",
+            title: "Netlist",
+            components: [],
+            wires: [],
+            pins: [],
+            parentId: null
+          }
+        ]);
+        setActiveLevelId("root");
+        setSelectedIds(new Set());
+        setPendingDevice(null);
+        setProbeMode(false);
+        setGeneratedNetlist("");
+        setResponsePreview("");
+        setNetlistMode("netlist");
+        setStatus("idle");
+        setStatusMsg("Schematic cleared; netlist editor is active.");
+      }
+      setNetlistText(nextText);
+      return true;
+    },
+    [netlistMode]
+  );
+
   /**
    * The probe-node picker lists labels exactly as they appear in the plot
    * (``V(<net>)`` and ``I(<branch>)``). Storing the full label in
@@ -242,7 +354,7 @@ export function App() {
   const availableNodes = useMemo(() => {
     const nodeSet = new Set<string>();
     const branchSet = new Set<string>();
-    const lines = generatedNetlist.split(/\r?\n/);
+    const lines = (netlistMode === "netlist" ? netlistText : generatedNetlist).split(/\r?\n/);
     for (const raw of lines) {
       const tok = raw.trim().split(/\s+/);
       if (tok.length < 3) continue;
@@ -261,7 +373,7 @@ export function App() {
     const nodes = Array.from(nodeSet).sort().map((n) => `V(${n})`);
     const branches = Array.from(branchSet).sort().map((b) => `I(${b})`);
     return [...nodes, ...branches];
-  }, [generatedNetlist]);
+  }, [generatedNetlist, netlistMode, netlistText]);
 
   /* -------------- Toolbar / library -------------- */
 
@@ -332,39 +444,47 @@ export function App() {
 
   const runSimulation = useCallback(async () => {
     if (running) return;
+    activeDynamicTilesRef.current.clear();
+    startStatusTimer();
     setRunning(true);
     setStatus("running");
     setStatusMsg("");
-    const payload = buildSchematicPayload(
-      activeLevel.components,
-      activeLevel.wires,
-      analysis,
-      levels,
-      activeLevel.junctions ?? []
-    );
+    const schematicPayload =
+      netlistMode === "netlist"
+        ? null
+        : buildSchematicPayload(
+            activeLevel.components,
+            activeLevel.wires,
+            analysis,
+            levels,
+            activeLevel.junctions ?? []
+          );
     try {
       const res = await fetch("/api/simulate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          netlist_text: "",
+          netlist_text: netlistMode === "netlist" ? netlistText : "",
           mode: analysis.mode,
-          options: {},
-          schematic: payload
+          options: { ...krylovRequestOptions(analysis), output_max_points: MAX_STATIC_PLOT_POINTS },
+          schematic: schematicPayload ?? undefined
         })
       });
       const body = await res.json();
       if (!res.ok) {
         setStatus("error");
         setStatusMsg(body?.detail?.message ?? "Simulation failed.");
-        setResponsePreview(JSON.stringify(body, null, 2));
+        setResponsePreview(formatResponsePreview(body));
       } else {
         setStatus("ok");
         setStatusMsg(`${analysis.mode.toUpperCase()} complete (${body.status}).`);
+        setStatusIterationCount(responseIterationCount(body, analysis.mode));
         if (body?.metadata?.generated_netlist) {
           setGeneratedNetlist(String(body.metadata.generated_netlist));
+        } else if (netlistMode === "netlist") {
+          setGeneratedNetlist(netlistText);
         }
-        setResponsePreview(JSON.stringify(body, null, 2));
+        setResponsePreview(formatResponsePreview(body));
 
         // Materialize a plot tile.
         if (analysis.mode === "tran" && body.waveform) {
@@ -409,13 +529,19 @@ export function App() {
       setStatusMsg(String(err));
     } finally {
       setRunning(false);
+      stopStatusTimer();
     }
-  }, [analysis, activeLevel, levels, running]);
+  }, [analysis, activeLevel, levels, netlistMode, netlistText, running, setStatusIterationCount, startStatusTimer, stopStatusTimer]);
 
   /* -------------- Probe click → open .dyn tile -------------- */
 
   const onProbePick = useCallback(
     (target: ProbeTarget) => {
+      if (netlistMode === "netlist") {
+        setStatus("error");
+        setStatusMsg("Dynamic probe needs a schematic. Run the edited netlist with Run.");
+        return;
+      }
       const payload = buildSchematicPayload(
         activeLevel.components,
         activeLevel.wires,
@@ -424,17 +550,13 @@ export function App() {
         activeLevel.junctions ?? []
       );
       const speed = parseValue(analysis.dynSpeed);
-      const tStopSim = parseValue(analysis.tStop);
-      const wallDuration = speed > 0 ? tStopSim / speed : 0;
       const windowSim = parseValue(analysis.dynWindow);
       const tileId = genId("tile");
       const nodeLabel = target.netLabel ?? `${target.componentId}.${target.pin}`;
 
       const proto = location.protocol === "https:" ? "wss" : "ws";
       const ws = new WebSocket(`${proto}://${location.host}/ws/dyn`);
-      const titleSuffix = analysis.continuous
-        ? "∞"
-        : `${wallDuration.toFixed(wallDuration >= 10 ? 0 : 1)}s`;
+      const titleSuffix = "∞";
       const tileRecord: TileRecord = {
         id: tileId,
         title: `.dyn ${nodeLabel} @ ${analysis.dynSpeed}s/s · ${titleSuffix}`,
@@ -448,6 +570,9 @@ export function App() {
         windowSeconds: windowSim
       };
       setTiles((cur) => [...cur, tileRecord]);
+      beginDynamicMetrics(tileId);
+      setStatus("running");
+      setStatusMsg(`Dynamic probe: ${nodeLabel}.`);
 
       ws.onopen = () => {
         ws.send(
@@ -458,7 +583,8 @@ export function App() {
             t_step: analysis.tStep,
             window: analysis.dynWindow,
             pin_refs: [{ component_id: target.componentId, pin: target.pin }],
-            continuous: analysis.continuous
+            continuous: true,
+            ...krylovRequestOptions(analysis)
           })
         );
       };
@@ -468,37 +594,41 @@ export function App() {
         const msg = JSON.parse(e.data);
         if (msg.type === "meta") {
           streamLabels = msg.labels ?? [];
+          setStatusMsg(`Dynamic probe: ${streamLabels.length} series.`);
         } else if (msg.type === "frame") {
           const rec = tilesRef.current.get(tileId);
           if (rec?.push && streamLabels.length > 0) {
             const vals = (msg.values as number[]).map((v) => Number(v) || 0);
             rec.push(Number(msg.t), vals, streamLabels);
+            bumpStatusIteration();
           }
         } else if (msg.type === "loop") {
-          // continuous boundary — no-op
+          // Loop boundaries are accepted for compatibility with older clients.
         } else if (msg.type === "done") {
           const rec = tilesRef.current.get(tileId);
           rec?.finalize?.();
+          endDynamicMetrics(tileId);
         } else if (msg.type === "error") {
           setStatus("error");
           setStatusMsg(String(msg.message));
+          endDynamicMetrics(tileId);
         }
       };
       ws.onerror = () => {
         setStatus("error");
         setStatusMsg("Realtime stream failed.");
+        endDynamicMetrics(tileId);
       };
     },
-    [activeLevel, analysis, levels]
+    [activeLevel, analysis, beginDynamicMetrics, bumpStatusIteration, endDynamicMetrics, levels, netlistMode]
   );
 
   const startCaredNodeDisplay = useCallback(() => {
-    if (analysis.probeNodes.length === 0) {
+    if (netlistMode === "netlist") {
       setStatus("error");
-      setStatusMsg("Add one or more display nodes first.");
+      setStatusMsg("Dynamic display needs a schematic. Run the edited netlist with Run.");
       return;
     }
-
     const payload = buildSchematicPayload(
       activeLevel.components,
       activeLevel.wires,
@@ -507,8 +637,6 @@ export function App() {
       activeLevel.junctions ?? []
     );
     const speed = parseValue(analysis.dynSpeed);
-    const tStopSim = parseValue(analysis.tStop);
-    const wallDuration = speed > 0 ? tStopSim / speed : 0;
     const windowSim = parseValue(analysis.dynWindow);
     const tileId = genId("tile");
     const canvas = document.querySelector(".canvasArea") as HTMLElement | null;
@@ -517,10 +645,13 @@ export function App() {
 
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${proto}://${location.host}/ws/dyn`);
-    const titleSuffix = analysis.continuous
-      ? "∞"
-      : `${wallDuration.toFixed(wallDuration >= 10 ? 0 : 1)}s`;
-    const labelsTitle = analysis.probeNodes.length === 1 ? analysis.probeNodes[0] : `${analysis.probeNodes.length} nodes`;
+    const titleSuffix = "∞";
+    const labelsTitle =
+      analysis.probeNodes.length === 0
+        ? "all nodes"
+        : analysis.probeNodes.length === 1
+          ? analysis.probeNodes[0]
+          : `${analysis.probeNodes.length} nodes`;
     const tileRecord: TileRecord = {
       id: tileId,
       title: `.dyn ${labelsTitle} @ ${analysis.dynSpeed}s/s · ${titleSuffix}`,
@@ -533,6 +664,9 @@ export function App() {
       windowSeconds: windowSim
     };
     setTiles((cur) => [...cur, tileRecord]);
+    beginDynamicMetrics(tileId);
+    setStatus("running");
+    setStatusMsg(`Dynamic display: ${labelsTitle}.`);
 
     ws.onopen = () => {
       ws.send(
@@ -543,7 +677,8 @@ export function App() {
           t_step: analysis.tStep,
           window: analysis.dynWindow,
           nodes: analysis.probeNodes,
-          continuous: analysis.continuous
+          continuous: true,
+          ...krylovRequestOptions(analysis)
         })
       );
     };
@@ -553,25 +688,32 @@ export function App() {
       const msg = JSON.parse(e.data);
       if (msg.type === "meta") {
         streamLabels = msg.labels ?? [];
+        setStatusMsg(`Dynamic display: ${streamLabels.length} series.`);
       } else if (msg.type === "frame") {
         const rec = tilesRef.current.get(tileId);
         if (rec?.push && streamLabels.length > 0) {
           const vals = (msg.values as number[]).map((v) => Number(v) || 0);
           rec.push(Number(msg.t), vals, streamLabels);
+          bumpStatusIteration();
         }
       } else if (msg.type === "done") {
         const rec = tilesRef.current.get(tileId);
         rec?.finalize?.();
+        endDynamicMetrics(tileId);
+      } else if (msg.type === "loop") {
+        // Continuous display loop boundary.
       } else if (msg.type === "error") {
         setStatus("error");
         setStatusMsg(String(msg.message));
+        endDynamicMetrics(tileId);
       }
     };
     ws.onerror = () => {
       setStatus("error");
       setStatusMsg("Realtime display failed.");
+      endDynamicMetrics(tileId);
     };
-  }, [activeLevel, analysis, levels]);
+  }, [activeLevel, analysis, beginDynamicMetrics, bumpStatusIteration, endDynamicMetrics, levels, netlistMode]);
 
   /* Track tile-id → push/finalize handles without re-renders. */
   const tilesRef = useRef<Map<string, TileRecord>>(new Map());
@@ -606,6 +748,7 @@ export function App() {
       cur.find((t) => t.id === id)?.socket?.close();
       return cur.filter((t) => t.id !== id);
     });
+    endDynamicMetrics(id);
   }
 
   /* -------------- Probe node list for .tran picker -------------- */
@@ -622,6 +765,14 @@ export function App() {
     (label: string) => setAnalysis((cur) => ({ ...cur, probeNodes: cur.probeNodes.filter((n) => n !== label) })),
     []
   );
+  const clearProbeNodes = useCallback(() => {
+    setAnalysis((cur) => ({ ...cur, probeNodes: [] }));
+  }, []);
+  const resetAnalysisControls = useCallback(() => {
+    setAnalysis({ ...defaultAnalysis });
+    setStatus("idle");
+    setStatusMsg("Simulation controls reset.");
+  }, []);
 
   /* -------------- Presets / demos -------------- */
 
@@ -653,6 +804,8 @@ export function App() {
     setAnalysis({ ...defaultAnalysis, ...preset.analysis });
     setSelectedIds(new Set());
     setGeneratedNetlist("");
+    setNetlistMode("schematic");
+    setNetlistText("");
     setResponsePreview("");
     setStatus("idle");
     setStatusMsg(`Preset "${preset.title}" loaded.`);
@@ -796,18 +949,23 @@ export function App() {
             </button>
             {demoOpen ? (
               <div className="menubar__dropdownPanel">
-                {HIDDEN_DEMO_PRESETS.map((d) => (
-                  <button
-                    key={d.id}
-                    className="menubar__dropdownItem"
-                    onMouseDown={() => {
-                      applyPreset(d);
-                      setDemoOpen(false);
-                    }}
-                  >
-                    <strong>{d.title}</strong>
-                    <span className="menubar__dropdownDesc">{d.description}</span>
-                  </button>
+                {DEMO_MENU_GROUPS.map((group) => (
+                  <div key={group.title} className="menubar__dropdownGroup">
+                    <div className="menubar__dropdownHeading">{group.title}</div>
+                    {group.presets.map((d) => (
+                      <button
+                        key={d.id}
+                        className="menubar__dropdownItem"
+                        onMouseDown={() => {
+                          applyPreset(d);
+                          setDemoOpen(false);
+                        }}
+                      >
+                        <strong>{d.title}</strong>
+                        <span className="menubar__dropdownDesc">{d.description}</span>
+                      </button>
+                    ))}
+                  </div>
                 ))}
               </div>
             ) : null}
@@ -818,6 +976,8 @@ export function App() {
         <div className="menubar__status">
           <span className={`statusDot ${status}`} />
           <span>{statusMsg || (status === "idle" ? "Ready" : status)}</span>
+          <span className="menubar__metric">t {formatElapsed(statusElapsedMs)}</span>
+          <span className="menubar__metric">iter {formatCount(statusIterations)}</span>
         </div>
       </div>
 
@@ -826,7 +986,7 @@ export function App() {
         onPickDevice={setPendingDevice}
         onToggleProbe={() => setProbeMode((v) => !v)}
         probeMode={probeMode}
-        onRun={runSimulation}
+        onStartDisplay={startCaredNodeDisplay}
         running={running}
       />
 
@@ -840,6 +1000,8 @@ export function App() {
         availableNodes={availableNodes}
         onAddProbeNode={addProbeNode}
         onRemoveProbeNode={removeProbeNode}
+        onClearProbeNodes={clearProbeNodes}
+        onResetAnalysis={resetAnalysisControls}
         levels={levels}
         activeLevelId={activeLevelId}
         onSelectLevel={setActiveLevelId}
@@ -852,6 +1014,9 @@ export function App() {
         onUpdateComponent={updateComponent}
         netlistPreview={netlistPreview}
         generatedNetlist={generatedNetlist}
+        netlistMode={netlistMode}
+        netlistText={netlistText}
+        onNetlistTextChange={handleNetlistTextChange}
       />
 
       <div className="canvasArea" style={{ position: "relative" }}>
@@ -870,14 +1035,6 @@ export function App() {
           onCopy={onCopy}
           onPaste={onPaste}
         />
-        <button
-          className="canvasDisplayBtn"
-          disabled={analysis.probeNodes.length === 0}
-          onClick={startCaredNodeDisplay}
-          title="Start a dynamic display for the selected display nodes"
-        >
-          Display
-        </button>
         <div className="tileLayer">
           {tiles.map((tile) => (
             <PlotTile
@@ -947,6 +1104,91 @@ function parseValue(raw: string): number {
   return base;
 }
 
+function formatElapsed(ms: number): string {
+  const seconds = Math.max(0, ms / 1000);
+  if (seconds < 10) return `${seconds.toFixed(1)}s`;
+  if (seconds < 60) return `${seconds.toFixed(0)}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = Math.floor(seconds % 60);
+  return `${minutes}:${String(rest).padStart(2, "0")}`;
+}
+
+function formatCount(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1).replace(/\.0$/, "")}k`;
+  return String(value);
+}
+
+function sampledIndexes(length: number, maxPoints: number): number[] | null {
+  if (length <= maxPoints) return null;
+  const stride = Math.max(1, Math.ceil(length / maxPoints));
+  const indexes: number[] = [];
+  for (let i = 0; i < length; i += stride) indexes.push(i);
+  if (indexes[indexes.length - 1] !== length - 1) indexes.push(length - 1);
+  return indexes;
+}
+
+function responseIterationCount(body: Record<string, any>, mode: string): number {
+  const krylovIterations = Number(body?.metadata?.krylov_iterations);
+  if (Number.isFinite(krylovIterations) && krylovIterations > 0) {
+    return krylovIterations;
+  }
+  const decimation = body?.metadata?.output_decimation;
+  if (mode === "tran" && body?.waveform?.time) {
+    return Number(decimation?.original_points ?? body.waveform.time.length ?? 0);
+  }
+  if (body?.waveform?.time) return Number(body.waveform.time.length ?? 0);
+  if (body?.spectrum?.frequencies) return Number(body.spectrum.frequencies.length ?? 0);
+  if (body?.dc_solution) return Number(body.dc_solution.length ?? 0);
+  return 0;
+}
+
+function nestedValueCount(values: unknown): number {
+  if (!Array.isArray(values)) return 0;
+  if (values.length === 0) return 0;
+  if (Array.isArray(values[0])) {
+    return (values as unknown[][]).reduce((sum, row) => sum + row.length, 0);
+  }
+  return values.length;
+}
+
+function compactSeriesPayload(payload: unknown, axisKey: "time" | "frequencies"): unknown {
+  if (!payload || typeof payload !== "object") return payload;
+  const record = payload as Record<string, unknown>;
+  const axis = Array.isArray(record[axisKey]) ? (record[axisKey] as unknown[]) : [];
+  const valueKey = record.values !== undefined ? "values" : "magnitudes";
+  const values = record[valueKey];
+  const totalValues = nestedValueCount(values);
+  if (axis.length + totalValues <= MAX_RESPONSE_PREVIEW_VALUES) return payload;
+  const valueRows = Array.isArray(values) ? values.length : 0;
+  const valueCols = valueRows > 0 && Array.isArray((values as unknown[])[0]) ? ((values as unknown[][])[0]?.length ?? 0) : valueRows;
+  return {
+    [axisKey]: {
+      count: axis.length,
+      first: axis[0],
+      last: axis[axis.length - 1]
+    },
+    [valueKey]: {
+      shape: [valueRows, valueCols],
+      omitted: totalValues
+    },
+    labels: record.labels
+  };
+}
+
+function formatResponsePreview(body: unknown): string {
+  if (!body || typeof body !== "object") {
+    return JSON.stringify(body, null, 2);
+  }
+  const record = body as Record<string, unknown>;
+  const preview = {
+    ...record,
+    waveform: compactSeriesPayload(record.waveform, "time"),
+    spectrum: compactSeriesPayload(record.spectrum, "frequencies")
+  };
+  return JSON.stringify(preview, null, 2);
+}
+
 function toPlotData(
   waveform: { time: number[]; values: number[][]; labels: string[] },
   xLabel: string,
@@ -956,26 +1198,32 @@ function toPlotData(
   const t = waveform.time ?? [];
   const vs = waveform.values ?? [];
   const labels = waveform.labels ?? [];
+  const wanted = filterLabels.length > 0 ? new Set(filterLabels) : null;
+  const labelIndexes = labels
+    .map((label, index) => ({ label, index }))
+    .filter((entry) => !wanted || wanted.has(entry.label));
+  const sample = sampledIndexes(t.length, MAX_STATIC_PLOT_POINTS);
+  const x = sample ? sample.map((i) => Number(t[i] ?? 0)) : t;
   const rows = vs.length;
   const cols = rows > 0 ? (Array.isArray(vs[0]) ? vs[0].length : 0) : 0;
   const isRowMajor = rows === t.length && cols === labels.length;
   let series: { label: string; values: number[] }[];
   if (isRowMajor) {
-    series = labels.map((lbl, j) => ({
-      label: lbl,
-      values: vs.map((row) => Number((row as number[])[j] ?? 0))
+    series = labelIndexes.map(({ label, index }) => ({
+      label,
+      values: sample
+        ? sample.map((i) => Number((vs[i] as number[] | undefined)?.[index] ?? 0))
+        : vs.map((row) => Number((row as number[])[index] ?? 0))
     }));
   } else {
-    series = labels.map((lbl, j) => ({
-      label: lbl,
-      values: (vs[j] as number[] | undefined)?.map((v) => Number(v)) ?? []
+    series = labelIndexes.map(({ label, index }) => ({
+      label,
+      values: sample
+        ? sample.map((i) => Number((vs[index] as number[] | undefined)?.[i] ?? 0))
+        : (vs[index] as number[] | undefined)?.map((v) => Number(v)) ?? []
     }));
   }
-  if (filterLabels.length > 0) {
-    const wanted = new Set(filterLabels);
-    series = series.filter((s) => wanted.has(s.label));
-  }
-  return { x: t, series, xLabel, yLabel };
+  return { x, series, xLabel, yLabel };
 }
 
 function toSpectrumPlot(spectrum: {

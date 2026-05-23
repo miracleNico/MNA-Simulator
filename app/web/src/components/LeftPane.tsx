@@ -20,6 +20,8 @@ type Props = {
   availableNodes: string[];
   onAddProbeNode: (label: string) => void;
   onRemoveProbeNode: (label: string) => void;
+  onClearProbeNodes: () => void;
+  onResetAnalysis: () => void;
 
   levels: SchematicLevel[];
   activeLevelId: string;
@@ -36,6 +38,9 @@ type Props = {
 
   netlistPreview: string;
   generatedNetlist: string;
+  netlistMode: "schematic" | "netlist";
+  netlistText: string;
+  onNetlistTextChange: (text: string) => boolean;
 };
 
 export function LeftPane(props: Props) {
@@ -48,6 +53,8 @@ export function LeftPane(props: Props) {
           availableNodes={props.availableNodes}
           onAddProbeNode={props.onAddProbeNode}
           onRemoveProbeNode={props.onRemoveProbeNode}
+          onClearProbeNodes={props.onClearProbeNodes}
+          onResetAnalysis={props.onResetAnalysis}
           onRun={props.onRun}
           running={props.running}
         />
@@ -90,9 +97,19 @@ export function LeftPane(props: Props) {
           lets you hover a pin and click it to stream a live scope tile (.dyn mode).
         </div>
         <div className="formRow" style={{ marginTop: 10 }}>
-          <label>Net preview</label>
+          <label>Netlist</label>
         </div>
-        <pre className="miniPreview">{props.generatedNetlist || props.netlistPreview}</pre>
+        <textarea
+          className="textarea miniPreview netlistEditor"
+          spellCheck={false}
+          value={props.netlistMode === "netlist" ? props.netlistText : props.generatedNetlist || props.netlistPreview}
+          onChange={(e) => {
+            props.onNetlistTextChange(e.target.value);
+          }}
+        />
+        <div className="hintText" style={{ marginTop: 6 }}>
+          Editing this netlist clears the schematic after confirmation.
+        </div>
       </CollapsibleSection>
 
       <CollapsibleSection title="Library">
@@ -119,13 +136,13 @@ export function LeftPane(props: Props) {
   );
 }
 
-function parseMetric(raw: string): number {
+function parseMetric(raw?: string): number {
   if (!raw) return NaN;
-  const m = raw.trim().match(/^([-+]?[0-9]*\.?[0-9]+)([a-zA-Zµ]*)$/);
-  if (!m) return Number(raw);
-  const base = Number(m[1]);
-  const suf = (m[2] || "").toLowerCase();
-  const table: Record<string, number> = {
+  const match = raw.trim().match(/^([-+]?[0-9]*\.?[0-9]+(?:e[-+]?\d+)?)([a-zA-Zµ]*)$/i);
+  if (!match) return Number(raw);
+  const base = Number(match[1]);
+  const suffix = (match[2] || "").toLowerCase();
+  const scale: Record<string, number> = {
     "": 1,
     f: 1e-15,
     p: 1e-12,
@@ -137,17 +154,41 @@ function parseMetric(raw: string): number {
     meg: 1e6,
     g: 1e9
   };
-  return suf in table ? base * table[suf] : base;
+  return suffix in scale ? base * scale[suffix] : Number(raw);
 }
 
-function estimateWallDuration(tStop: string, dynSpeed: string): string {
-  const t = parseMetric(tStop);
-  const s = parseMetric(dynSpeed);
-  if (!isFinite(t) || !isFinite(s) || s <= 0) return "–";
-  const wall = t / s;
-  if (wall >= 60) return `${wall.toFixed(0)}`;
-  if (wall >= 1) return `${wall.toFixed(1)}`;
-  return `${wall.toFixed(2)}`;
+function formatMetric(value: number): string {
+  const absValue = Math.abs(value);
+  const choices: [number, string][] = [
+    [1e9, "G"],
+    [1e6, "Meg"],
+    [1e3, "k"],
+    [1, ""],
+    [1e-3, "m"],
+    [1e-6, "u"],
+    [1e-9, "n"],
+    [1e-12, "p"]
+  ];
+  const [scale, suffix] = choices.find(([candidate]) => absValue >= candidate) ?? [1e-15, "f"];
+  const scaled = value / scale;
+  return `${Number(scaled.toPrecision(4))}${suffix}`;
+}
+
+function sourceSubtypePatch(component: CanvasComponent, subtype: string): Partial<CanvasComponent> {
+  const previousSubtype = component.subtype ?? "DC";
+  const patch: Partial<CanvasComponent> = { subtype };
+  if ((subtype === "SIN" || subtype === "COS") && previousSubtype === "STEP") {
+    const delay = parseMetric(component.value2);
+    patch.value2 = Number.isFinite(delay) && delay > 0 ? formatMetric(1 / delay) : "1Meg";
+  } else if ((subtype === "SIN" || subtype === "COS") && (!component.value2 || previousSubtype === "FUNC")) {
+    patch.value2 = "1Meg";
+  } else if (subtype === "STEP" && (previousSubtype === "SIN" || previousSubtype === "COS")) {
+    const frequency = parseMetric(component.value2);
+    patch.value2 = Number.isFinite(frequency) && frequency > 0 ? formatMetric(1 / frequency) : "1u";
+  } else if (subtype === "FUNC" && previousSubtype !== "FUNC") {
+    patch.value2 = "0";
+  }
+  return patch;
 }
 
 function CollapsibleSection({
@@ -177,6 +218,8 @@ function SimulationControls({
   availableNodes,
   onAddProbeNode,
   onRemoveProbeNode,
+  onClearProbeNodes,
+  onResetAnalysis,
   onRun,
   running
 }: {
@@ -185,6 +228,8 @@ function SimulationControls({
   availableNodes: string[];
   onAddProbeNode: (label: string) => void;
   onRemoveProbeNode: (label: string) => void;
+  onClearProbeNodes: () => void;
+  onResetAnalysis: () => void;
   onRun: () => void;
   running: boolean;
 }) {
@@ -194,6 +239,20 @@ function SimulationControls({
     { value: "ac", label: ".ac" },
     { value: "hb", label: ".hb" }
   ];
+  const krylovValueLabel =
+    analysis.krylovMethod === "arnoldi_gmres"
+      ? "restart"
+      : analysis.krylovMethod === "auto"
+        ? "rank/budget"
+        : "iter budget";
+  const krylovHint =
+    analysis.krylovMethod === "arnoldi_gmres"
+      ? "Arnoldi/GMRES uses the manual value as the restarted subspace size."
+      : analysis.krylovMethod === "conjugate_gradient"
+        ? "CG uses the manual value as a maximum iteration budget; there is no restarted subspace."
+        : analysis.krylovMethod === "conjugate_residual"
+          ? "MINRES/CR uses the manual value as a maximum iteration budget; there is no restarted subspace."
+          : "Auto chooses the method after matrix classification; the value is restart for Arnoldi and iteration budget for CG/MINRES.";
   return (
     <>
       <div className="formRow">
@@ -286,15 +345,9 @@ function SimulationControls({
         </>
       )}
 
-      <div
-        style={{
-          marginTop: 10,
-          paddingTop: 10,
-          borderTop: "1px solid var(--border-subtle, rgba(255,255,255,0.08))"
-        }}
-      >
+      <div className="controlBlock">
         <div className="hintText" style={{ marginBottom: 6 }}>
-          Dynamic probe — click the probe icon, then click a pin.
+          Dynamic display — add display nodes and press the toolbar play icon, or use probe to click a pin.
         </div>
         <div className="formRow">
           <label title="Simulation seconds per real-time second. e.g. 1m = 1ms of sim per 1 s of wall time.">
@@ -317,25 +370,86 @@ function SimulationControls({
             placeholder="5m"
           />
         </div>
+      </div>
+
+      <div className="controlDivider" />
+
+      <div className="controlBlock">
         <div className="formRow">
-          <label title="When checked, the probe stream loops forever. When unchecked, it runs for tran duration ÷ speed wall-seconds.">
-            continuous
+          <label title="Enable an iterative Krylov linear solve path. Auto chooses by matrix class; manual algorithm selection overrides the class.">
+            krylov
           </label>
           <input
             type="checkbox"
-            checked={analysis.continuous}
-            onChange={(e) => onAnalysisChange({ continuous: e.target.checked })}
+            checked={analysis.krylov}
+            onChange={(e) => onAnalysisChange({ krylov: e.target.checked })}
           />
         </div>
+        {analysis.krylov ? (
+          <>
+            <div className="formRow">
+              <label>algorithm</label>
+              <select
+                className="select"
+                value={analysis.krylovMethod}
+                onChange={(e) => onAnalysisChange({ krylovMethod: e.target.value as AnalysisState["krylovMethod"] })}
+              >
+                <option value="auto">Auto</option>
+                <option value="arnoldi_gmres">Arnoldi / GMRES</option>
+                <option value="conjugate_residual">MINRES / CR</option>
+                <option value="conjugate_gradient">Conjugate Gradient</option>
+              </select>
+            </div>
+            <div className="formRow">
+              <label title="Auto uses 50% of the actual generated matrix dimension. Manual sends the integer rank you enter.">
+                rank
+              </label>
+              <select
+                className="select"
+                value={analysis.krylovRankMode}
+                onChange={(e) => onAnalysisChange({ krylovRankMode: e.target.value as AnalysisState["krylovRankMode"] })}
+              >
+                <option value="auto">Auto</option>
+                <option value="manual">Manual</option>
+              </select>
+            </div>
+            {analysis.krylovRankMode === "manual" ? (
+              <div className="formRow">
+                <label>{krylovValueLabel}</label>
+                <input
+                  className="input"
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={analysis.krylovRank}
+                  onChange={(e) => {
+                    const next = Math.max(1, Math.floor(Number(e.target.value) || 1));
+                    onAnalysisChange({ krylovRank: next });
+                  }}
+                />
+              </div>
+            ) : null}
+          </>
+        ) : null}
         <div className="hintText" style={{ marginTop: 4 }}>
-          {analysis.continuous
-            ? `Infinite stream — only the most recent ${analysis.dynWindow}s of sim time is shown.`
-            : `Finite stream: t_stop ÷ speed ≈ ${estimateWallDuration(analysis.tStop, analysis.dynSpeed)} s wall.`}
+          {analysis.krylov
+            ? `${krylovHint} Auto rank resolves to ceil(50% of matrix dimension).`
+            : "Krylov disabled: simulations use the regular direct solver path."}
         </div>
       </div>
 
       <div className="formRow" style={{ flexDirection: "column", alignItems: "stretch" }}>
-        <label style={{ marginBottom: 6 }}>Display nodes</label>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+          <label style={{ marginBottom: 0, flex: 1 }}>Display nodes</label>
+          <button
+            className="ghostBtn"
+            type="button"
+            onClick={onClearProbeNodes}
+            disabled={analysis.probeNodes.length === 0}
+          >
+            Clear
+          </button>
+        </div>
         <div style={{ display: "flex", flexWrap: "wrap" }}>
           {analysis.probeNodes.length === 0 ? (
             <span className="hintText" style={{ marginLeft: 0 }}>
@@ -374,9 +488,14 @@ function SimulationControls({
         </select>
       </div>
 
-      <button className="runBtn" disabled={running} onClick={onRun} style={{ marginTop: 6 }}>
-        {running ? "Running…" : `Run ${analysis.mode}`}
-      </button>
+      <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+        <button className="runBtn" disabled={running} onClick={onRun} style={{ flex: 1, width: "auto" }}>
+          {running ? "Running…" : `Run ${analysis.mode}`}
+        </button>
+        <button className="ghostBtn" type="button" onClick={onResetAnalysis}>
+          Clear
+        </button>
+      </div>
     </>
   );
 }
@@ -550,8 +669,27 @@ function PropertyEditor({
   const isSubckt = component.type === "SUBCKT";
   const isLabel = component.type === "LABEL";
   const isNode = component.type === "NODE";
+  const mosModel = component.metadata?.model === "level1" ? "level1" : "small_signal";
   const updateMetadata = (key: string, value: string) =>
     onUpdate({ metadata: { ...(component.metadata ?? {}), [key]: value } });
+  const updateMosModel = (model: "small_signal" | "level1") => {
+    const metadata = { ...(component.metadata ?? {}), model };
+    if (model === "level1") {
+      onUpdate({
+        metadata: { ...metadata, cgs: metadata.cgs ?? "2f", cgd: metadata.cgd ?? "1f" },
+        value: component.value || "1m",
+        value2: component.value2 && component.value2 !== "50k" ? component.value2 : "0.4",
+        value3: component.value3 && component.value3 !== "5p" ? component.value3 : "0.02"
+      });
+    } else {
+      onUpdate({
+        metadata: { ...metadata, cgd: metadata.cgd ?? "1p", gmb: metadata.gmb ?? "0", cbs: metadata.cbs ?? "0", cbd: metadata.cbd ?? "0" },
+        value: component.value || "5m",
+        value2: component.value2 && component.value2 !== "0.4" ? component.value2 : "50k",
+        value3: component.value3 && component.value3 !== "0.02" ? component.value3 : "5p"
+      });
+    }
+  };
   const updatePinCount = (count: number) => {
     const safeCount = Math.max(1, Math.min(24, count || 1));
     const current = component.pins ?? [];
@@ -667,6 +805,42 @@ function PropertyEditor({
       {isMos ? (
         <>
           <div className="formRow">
+            <label>model</label>
+            <select
+              className="select"
+              value={mosModel}
+              onChange={(e) => updateMosModel(e.target.value as "small_signal" | "level1")}
+            >
+              <option value="small_signal">small-signal</option>
+              <option value="level1">Level-1</option>
+            </select>
+          </div>
+          {mosModel === "level1" ? (
+            <>
+              <div className="formRow">
+                <label>beta</label>
+                <input className="input" value={component.value} onChange={(e) => onUpdate({ value: e.target.value })} />
+              </div>
+              <div className="formRow">
+                <label>vth</label>
+                <input className="input" value={component.value2 ?? ""} onChange={(e) => onUpdate({ value2: e.target.value })} />
+              </div>
+              <div className="formRow">
+                <label>lambda</label>
+                <input className="input" value={component.value3 ?? ""} onChange={(e) => onUpdate({ value3: e.target.value })} />
+              </div>
+              <div className="formRow">
+                <label>Cgs</label>
+                <input className="input" value={component.metadata?.cgs ?? ""} onChange={(e) => updateMetadata("cgs", e.target.value)} />
+              </div>
+              <div className="formRow">
+                <label>Cgd</label>
+                <input className="input" value={component.metadata?.cgd ?? ""} onChange={(e) => updateMetadata("cgd", e.target.value)} />
+              </div>
+            </>
+          ) : (
+            <>
+          <div className="formRow">
             <label>gm</label>
             <input className="input" value={component.value} onChange={(e) => onUpdate({ value: e.target.value })} />
           </div>
@@ -694,6 +868,8 @@ function PropertyEditor({
             <label>Cbd</label>
             <input className="input" value={component.metadata?.cbd ?? "0"} onChange={(e) => updateMetadata("cbd", e.target.value)} />
           </div>
+            </>
+          )}
         </>
       ) : null}
       {isSource ? (
@@ -703,7 +879,7 @@ function PropertyEditor({
             <select
               className="select"
               value={component.subtype ?? "DC"}
-              onChange={(e) => onUpdate({ subtype: e.target.value })}
+              onChange={(e) => onUpdate(sourceSubtypePatch(component, e.target.value))}
             >
               <option value="DC">DC</option>
               <option value="AC">AC</option>

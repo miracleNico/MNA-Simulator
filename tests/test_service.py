@@ -75,3 +75,23 @@ def test_service_generated_netlist_metadata_for_schematic() -> None:
     assert response.status == "ok"
     assert "generated_netlist" in response.metadata
     assert ".op" in str(response.metadata["generated_netlist"])
+
+
+def test_service_decimates_large_waveform_output_when_requested() -> None:
+    response = SimulationService().run_request(
+        AnalysisRequest(
+            netlist_text="""
+            V1 n1 0 SIN 1 1k
+            R1 n1 0 1k
+            .tran 1m 1u
+            .end
+            """,
+            mode=AnalysisMode.TRAN,
+            options={"output_max_points": 100},
+        )
+    )
+
+    assert response.status == "ok"
+    assert response.waveform is not None
+    assert len(response.waveform["time"]) <= 101
+    assert response.metadata["output_decimation"]["original_points"] > response.metadata["output_decimation"]["returned_points"]

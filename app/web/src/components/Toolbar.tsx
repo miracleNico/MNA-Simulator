@@ -7,7 +7,7 @@ type Props = {
   onPickDevice: (type: DeviceType | null) => void;
   onToggleProbe: () => void;
   probeMode: boolean;
-  onRun: () => void;
+  onStartDisplay: () => void;
   running: boolean;
 };
 
@@ -81,9 +81,14 @@ export function Toolbar(props: Props) {
           <ProbeIcon />
           <span className="toolBtn__tip">Probe (.dyn)</span>
         </button>
-        <button className="toolBtn" onClick={props.onRun} title="Run simulation" disabled={props.running}>
+        <button
+          className="toolBtn"
+          onClick={props.onStartDisplay}
+          title="Start dynamic display for selected display nodes"
+          disabled={props.running}
+        >
           <RunIcon running={props.running} />
-          <span className="toolBtn__tip">Run</span>
+          <span className="toolBtn__tip">Display</span>
         </button>
       </div>
     </div>

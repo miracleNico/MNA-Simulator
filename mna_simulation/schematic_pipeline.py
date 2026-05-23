@@ -99,6 +99,11 @@ def _port_name_from_junction_id(junction_id: str) -> str | None:
     return junction_id[len(PORT_PREFIX) :]
 
 
+def _safe_net_name(raw: str) -> str:
+    name = re.sub(r"[^A-Za-z0-9_]+", "_", raw).strip("_")
+    return name or "node"
+
+
 def _port_junction_id(instance_prefix: str, pin: str) -> str:
     return f"{instance_prefix}{pin}"
 
@@ -270,6 +275,13 @@ def _build_component_line(
         drain = nodes.get("d", "")
         gate = nodes.get("g", "")
         source = nodes.get("s", "")
+        if component.metadata.get("model") == "level1":
+            beta = component.value or "1m"
+            vth = component.value2 or "0.4"
+            lambda_ = component.value3 or "0.02"
+            c_gs = component.metadata.get("cgs", "2f")
+            c_gd = component.metadata.get("cgd", "1f")
+            return f"{name} {drain} {gate} {source} {component.type} LEVEL1 {beta} {vth} {lambda_} {c_gs} {c_gd}"
         gm = component.value or "5m"
         r_o = component.value2 or "50k"
         c_gs = component.value3 or "5p"
@@ -373,6 +385,18 @@ def _top_level_net_name_hints(schematic: SchematicDocument) -> dict[str, str]:
                 ground_roots.add(union_find.find(ground_key))
 
     root_to_name: dict[str, str] = {}
+    for junction_id in junction_ids:
+        port_name = _port_name_from_junction_id(junction_id)
+        if port_name is None:
+            continue
+        key = f"jn:{junction_id}"
+        if key not in union_find.parent:
+            continue
+        root = union_find.find(key)
+        if root in ground_roots or root in root_to_name:
+            continue
+        root_to_name[root] = _safe_net_name(port_name)
+
     counter = 1
     for key in ordered_keys:
         root = union_find.find(key)
@@ -601,7 +625,7 @@ def schematic_to_netlist(
     """Convert schematic graph data into canonical netlist text."""
 
     has_hierarchy = any(component.type == "SUBCKT" for component in schematic.components)
-    net_name_hints = _top_level_net_name_hints(schematic) if has_hierarchy else {}
+    net_name_hints = _top_level_net_name_hints(schematic)
 
     # Recursively inline subcircuits before running net formation.
     schematic = _flatten_subcircuits(schematic)

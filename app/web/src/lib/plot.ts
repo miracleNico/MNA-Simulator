@@ -56,24 +56,26 @@ export function drawPlot(ctx: CanvasRenderingContext2D, w: number, h: number, da
 
   // Axis ranges
   const xs = data.x;
-  const allYs = data.series.flatMap((s) => s.values).filter((v) => Number.isFinite(v));
-  if ((xs.length < 2 && data.kind !== "bar") || allYs.length === 0) {
+  const yRange = finiteSeriesRange(data.series, data.kind === "stem" || data.kind === "bar");
+  if ((xs.length < 2 && data.kind !== "bar") || !yRange) {
     drawEmptyState(ctx, w, h, "no samples yet");
     return;
   }
 
   const useLogX = !!data.logX && xs.some((v) => v > 0);
-  const xFinite = xs.filter((v) => Number.isFinite(v) && (!useLogX || v > 0));
-  let xMin = Math.min(...xFinite);
-  let xMax = Math.max(...xFinite);
+  const xRange = finiteArrayRange(xs, useLogX);
+  if (!xRange) {
+    drawEmptyState(ctx, w, h, "no samples yet");
+    return;
+  }
+  let [xMin, xMax] = xRange;
   if (data.kind === "bar") {
     xMin -= 0.5;
     xMax += 0.5;
   }
   if (xMin === xMax) xMax = xMin + 1;
 
-  let yMin = data.kind === "stem" || data.kind === "bar" ? Math.min(0, ...allYs) : Math.min(...allYs);
-  let yMax = Math.max(...allYs);
+  let [yMin, yMax] = yRange;
   if (yMin === yMax) {
     yMin -= 1;
     yMax += 1;
@@ -210,7 +212,8 @@ export function drawPlot(ctx: CanvasRenderingContext2D, w: number, h: number, da
     } else {
       ctx.beginPath();
       let started = false;
-      for (let i = 0; i < n; i++) {
+      const stride = lineStride(n, plotW);
+      for (let i = 0; i < n; i += stride) {
         if (!Number.isFinite(xs[i]) || !Number.isFinite(series.values[i])) continue;
         if (useLogX && xs[i] <= 0) continue;
         const x = scaleX(xs[i], xMin, xMax, plotW, padL, useLogX);
@@ -220,6 +223,15 @@ export function drawPlot(ctx: CanvasRenderingContext2D, w: number, h: number, da
           started = true;
         } else {
           ctx.lineTo(x, y);
+        }
+      }
+      if (stride > 1 && n > 0) {
+        const i = n - 1;
+        if (Number.isFinite(xs[i]) && Number.isFinite(series.values[i]) && (!useLogX || xs[i] > 0)) {
+          const x = scaleX(xs[i], xMin, xMax, plotW, padL, useLogX);
+          const y = padT + plotH - ((series.values[i] - yMin) / (yMax - yMin)) * plotH;
+          if (!started) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
         }
       }
       ctx.stroke();
@@ -241,6 +253,38 @@ export function drawPlot(ctx: CanvasRenderingContext2D, w: number, h: number, da
     ctx.fillText(series.label, legendX + 14, legendY - 2);
     legendY += 14;
   });
+}
+
+function finiteArrayRange(values: number[], positiveOnly = false): [number, number] | null {
+  let min = Infinity;
+  let max = -Infinity;
+  for (const value of values) {
+    if (!Number.isFinite(value)) continue;
+    if (positiveOnly && value <= 0) continue;
+    if (value < min) min = value;
+    if (value > max) max = value;
+  }
+  return min === Infinity ? null : [min, max];
+}
+
+function finiteSeriesRange(series: PlotSeries[], includeZero = false): [number, number] | null {
+  let min = includeZero ? 0 : Infinity;
+  let max = includeZero ? 0 : -Infinity;
+  let found = false;
+  for (const entry of series) {
+    for (const value of entry.values) {
+      if (!Number.isFinite(value)) continue;
+      found = true;
+      if (value < min) min = value;
+      if (value > max) max = value;
+    }
+  }
+  return found ? [min, max] : null;
+}
+
+function lineStride(pointCount: number, plotWidth: number): number {
+  const target = Math.max(800, Math.floor(plotWidth * 2));
+  return Math.max(1, Math.ceil(pointCount / target));
 }
 
 function scaleX(

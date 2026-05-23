@@ -130,6 +130,21 @@ textarea {
   padding: 4px;
 }
 
+.menubar__dropdownGroup + .menubar__dropdownGroup {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--line-2);
+}
+
+.menubar__dropdownHeading {
+  padding: 5px 8px 3px;
+  color: var(--text-3);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+
 .menubar__dropdownItem {
   display: flex;
   flex-direction: column;
@@ -162,6 +177,15 @@ textarea {
   gap: 8px;
   font-size: 12px;
   color: var(--text-2);
+}
+
+.menubar__metric {
+  padding: 2px 6px;
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  color: var(--text-1);
+  background: var(--bg-0);
+  font-variant-numeric: tabular-nums;
 }
 
 .statusDot {
@@ -335,6 +359,17 @@ textarea {
   min-width: 72px;
 }
 
+.controlBlock {
+  margin-top: 10px;
+  padding-top: 10px;
+}
+
+.controlDivider {
+  height: 1px;
+  margin: 10px 0;
+  background: var(--border-subtle, rgba(255, 255, 255, 0.08));
+}
+
 .input,
 .select,
 .textarea {
@@ -391,6 +426,11 @@ textarea {
   background: var(--bg-2);
   border-color: var(--accent);
   color: var(--accent-2);
+}
+
+.ghostBtn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .hintText {
@@ -496,30 +536,6 @@ textarea {
   position: absolute;
   inset: 0;
   pointer-events: none;
-}
-
-.canvasDisplayBtn {
-  position: absolute;
-  top: 14px;
-  right: 16px;
-  z-index: 12;
-  pointer-events: auto;
-  padding: 7px 12px;
-  border: 1px solid rgba(110, 168, 255, 0.55);
-  background: rgba(17, 23, 38, 0.9);
-  color: var(--accent-2);
-  border-radius: 6px;
-  cursor: pointer;
-  box-shadow: var(--shadow-1);
-}
-
-.canvasDisplayBtn:hover {
-  background: var(--bg-2);
-}
-
-.canvasDisplayBtn:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
 }
 
 .tile {
@@ -728,4 +744,11 @@ textarea {
   max-height: 180px;
   overflow: auto;
   white-space: pre;
+}
+
+.netlistEditor {
+  width: 100%;
+  min-height: 180px;
+  resize: vertical;
+  display: block;
 }

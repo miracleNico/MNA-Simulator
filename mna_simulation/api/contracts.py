@@ -72,6 +72,12 @@ class AnalysisOptions:
     hb_harmonics: int | None = None
     hb_time_window: float | None = None
     init_condition: np.ndarray | str | None = None
+    use_krylov: bool = False
+    krylov_tol: float = 1e-9
+    krylov_max_iter: int = 2000
+    krylov_restart: int = 80
+    krylov_rank: int | str | None = "auto"
+    krylov_method: str = "auto"
 
 
 @dataclass(slots=True)
@@ -90,12 +96,16 @@ class MnaProblem:
 
     G: np.ndarray
     C: np.ndarray
+    G_sparse: Any | None
+    C_sparse: Any | None
     f_str: np.ndarray
+    solver_f_str: np.ndarray | None
     b_dc: np.ndarray
     b_ac: np.ndarray
     b_time_str: np.ndarray
     index_map: IndexMap
     components: list[ComponentRecord]
+    level1_mos_devices: list[dict[str, Any]] = field(default_factory=list)
     gmin: float = 0.0
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -141,6 +151,7 @@ class BackendCapabilities:
     supports_behavioral_sources: bool = True
     supports_harmonic_balance: bool = True
     supports_sparse_linear_solver: bool = False
+    supports_krylov_linear_solver: bool = False
     supports_cpp_acceleration: bool = False
 
 

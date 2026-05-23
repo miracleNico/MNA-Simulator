@@ -12,6 +12,49 @@ from ..netlist import parse_netlist_file, parse_netlist_text, select_analysis
 from ..utils import DEFAULT_GMIN_STEPS
 
 
+def _coerce_krylov_rank(value: object) -> int | str:
+    """Return ``auto`` or a positive integer Krylov rank request."""
+
+    if value is None:
+        return "auto"
+    if isinstance(value, str):
+        cleaned = value.strip().lower()
+        if cleaned == "auto":
+            return "auto"
+        value = cleaned
+    rank = int(value)
+    if rank < 1:
+        raise ValueError("krylov_rank must be 'auto' or a positive integer.")
+    return rank
+
+
+def _coerce_krylov_method(value: object) -> str:
+    """Return a normalized Krylov method selector."""
+
+    if value is None:
+        return "auto"
+    cleaned = str(value).strip().lower()
+    aliases = {
+        "": "auto",
+        "auto": "auto",
+        "arnoldi": "arnoldi_gmres",
+        "gmres": "arnoldi_gmres",
+        "arnoldi_gmres": "arnoldi_gmres",
+        "general": "arnoldi_gmres",
+        "cr": "conjugate_residual",
+        "minres": "conjugate_residual",
+        "conjugate_residual": "conjugate_residual",
+        "symmetric": "conjugate_residual",
+        "cg": "conjugate_gradient",
+        "conjugate_gradient": "conjugate_gradient",
+        "positive_definite": "conjugate_gradient",
+        "spd": "conjugate_gradient",
+    }
+    if cleaned not in aliases:
+        raise ValueError(f"Unknown Krylov method '{value}'.")
+    return aliases[cleaned]
+
+
 class PythonBackend:
     """Default backend using the extracted Python numerical stack."""
 
@@ -20,7 +63,8 @@ class PythonBackend:
         self.capabilities = BackendCapabilities(
             supports_behavioral_sources=True,
             supports_harmonic_balance=True,
-            supports_sparse_linear_solver=False,
+            supports_sparse_linear_solver=True,
+            supports_krylov_linear_solver=True,
             supports_cpp_acceleration=False,
         )
 
@@ -41,6 +85,15 @@ class PythonBackend:
         if overrides:
             option_values.update(overrides)
 
+        use_krylov = bool(option_values.get("use_krylov", option_values.get("krylov", False)))
+        if "krylov_rank" in option_values:
+            krylov_rank = _coerce_krylov_rank(option_values.get("krylov_rank"))
+        elif "krylov_restart" in option_values:
+            krylov_rank = _coerce_krylov_rank(option_values.get("krylov_restart"))
+        else:
+            krylov_rank = "auto"
+        krylov_method = _coerce_krylov_method(option_values.get("krylov_method", option_values.get("krylov_algorithm", "auto")))
+
         return AnalysisOptions(
             mode=effective_mode or directive.mode,
             gmin_steps=option_values.get("gmin_steps", DEFAULT_GMIN_STEPS),
@@ -55,6 +108,12 @@ class PythonBackend:
             hb_harmonics=option_values.get("harmonics"),
             hb_time_window=option_values.get("time_window"),
             init_condition=option_values.get("init_condition"),
+            use_krylov=use_krylov,
+            krylov_tol=float(option_values.get("krylov_tol", 1e-9)),
+            krylov_max_iter=int(option_values.get("krylov_max_iter", 2000)),
+            krylov_restart=int(option_values.get("krylov_restart", 80)),
+            krylov_rank=krylov_rank,
+            krylov_method=krylov_method,
         )
 
     def run(self, circuit: CircuitIR, options: AnalysisOptions) -> SimulationResult:

@@ -52,6 +52,60 @@ def test_schematic_round_trip_to_circuit_ir() -> None:
     assert "R1" in conversion.netlist_text
 
 
+def test_flat_schematic_named_node_markers_become_probeable_net_names() -> None:
+    schematic = SchematicDocument(
+        components=[
+            {"id": "gnd1", "type": "GND", "name": "GND1"},
+            {"id": "v1", "type": "V", "name": "V1", "subtype": "FUNC", "value": "0", "value2": "t"},
+            {"id": "r1", "type": "R", "name": "R1", "value": "1k"},
+        ],
+        junctions=[
+            {"id": "port_q_3_4"},
+        ],
+        wires=[
+            {
+                "id": "w-v-p",
+                "start": {"kind": "component_pin", "component_id": "v1", "pin": "p"},
+                "end": {"kind": "junction", "junction_id": "port_q_3_4"},
+            },
+            {
+                "id": "w-r-p",
+                "start": {"kind": "component_pin", "component_id": "r1", "pin": "p"},
+                "end": {"kind": "junction", "junction_id": "port_q_3_4"},
+            },
+            {
+                "id": "w-v-g",
+                "start": {"kind": "component_pin", "component_id": "v1", "pin": "n"},
+                "end": {"kind": "component_pin", "component_id": "gnd1", "pin": "g"},
+            },
+            {
+                "id": "w-r-g",
+                "start": {"kind": "component_pin", "component_id": "r1", "pin": "n"},
+                "end": {"kind": "component_pin", "component_id": "gnd1", "pin": "g"},
+            },
+        ],
+        analysis={"mode": "tran", "params": {"t_stop": "6n", "t_step": "1n"}},
+    )
+
+    netlist_text, pin_assignment = schematic_to_netlist(schematic)
+    assert "V1 q_3_4 0 FUNC 0 t" in netlist_text
+    assert "R1 q_3_4 0 1k" in netlist_text
+    assert pin_assignment["cp:v1:p"] == "q_3_4"
+
+    response = SimulationService().run_request(
+        AnalysisRequest(
+            netlist_text="",
+            mode=AnalysisMode.TRAN,
+            options={"probe_nodes": ["V(q_3_4)"]},
+            schematic=schematic,
+        )
+    )
+    assert response.status == "ok"
+    assert response.waveform is not None
+    assert response.waveform["time"]
+    assert "V(q_3_4)" in response.waveform["labels"]
+
+
 def test_schematic_bjt_is_preserved_in_generated_netlist() -> None:
     schematic = SchematicDocument(
         components=[

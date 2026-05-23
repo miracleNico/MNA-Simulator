@@ -106,7 +106,9 @@ async def dyn_stream(ws: WebSocket) -> None:
             "t_step": "0.1m",
             "pin_refs": [{"component_id": "...", "pin": "p"}, ...],  # optional
             "nodes": ["n1", ...],                  # optional, legacy label filter
-            "continuous": false                    # optional, loop playback forever
+            "continuous": false,                   # optional, loop playback forever
+            "use_krylov": false,                   # optional, auto Krylov linear solve
+            "max_frame_rate": 60                   # optional display stream cap
         }
         server -> {"type": "meta", "labels": [...], "t_stop": <float>, "speed": <float>, "sim_span": <float>, "continuous": <bool>}
         server -> {"type": "frame", "t": <float>, "values": [...] }   (many)
@@ -130,6 +132,10 @@ async def dyn_stream(ws: WebSocket) -> None:
         pin_refs = payload.get("pin_refs") or []
         nodes_filter = payload.get("nodes") or []
         continuous = bool(payload.get("continuous", False))
+        use_krylov = bool(payload.get("use_krylov", False))
+        krylov_rank = payload.get("krylov_rank", "auto")
+        krylov_method = payload.get("krylov_method", "auto")
+        max_frame_rate = max(1.0, float(payload.get("max_frame_rate", 60.0)))
 
         # Force the schematic to run as .tran with the requested params. Writing
         # them into schematic.analysis (not options) means they hit the netlist
@@ -143,7 +149,12 @@ async def dyn_stream(ws: WebSocket) -> None:
         request = AnalysisRequest(
             netlist_text="",
             mode=AnalysisMode.TRAN,
-            options={},
+            options={
+                "use_krylov": use_krylov,
+                "krylov_rank": krylov_rank,
+                "krylov_method": krylov_method,
+                "output_max_points": 6000,
+            },
             schematic=schematic,
         )
         loop = asyncio.get_event_loop()
@@ -204,12 +215,18 @@ async def dyn_stream(ws: WebSocket) -> None:
         )
 
         effective_speed = speed if speed > 0 else 1e-3
+        min_frame_interval = 1.0 / max_frame_rate
 
         async def stream_once(loop_wall0: float, sim_shift: float) -> bool:
             """Send one full playback. Returns False if client disconnected."""
             t0_sim_local = float(times[0]) if times else 0.0
+            last_sent_wall_offset = -float("inf")
             for step_idx, t_sim in enumerate(times):
-                target_wall = loop_wall0 + (float(t_sim) - t0_sim_local) / effective_speed
+                wall_offset = (float(t_sim) - t0_sim_local) / effective_speed
+                is_last_sample = step_idx == len(times) - 1
+                if wall_offset - last_sent_wall_offset < min_frame_interval and not is_last_sample:
+                    continue
+                target_wall = loop_wall0 + wall_offset
                 now = time.monotonic()
                 if target_wall > now:
                     try:
@@ -240,6 +257,7 @@ async def dyn_stream(ws: WebSocket) -> None:
                     return False
                 except RuntimeError:
                     return False
+                last_sent_wall_offset = wall_offset
             return True
 
         t0_wall = time.monotonic()

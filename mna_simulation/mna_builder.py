@@ -5,9 +5,10 @@ from __future__ import annotations
 from dataclasses import replace
 
 import numpy as np
+from scipy.sparse import dok_matrix
 
 from .api.contracts import CircuitIR, ComponentRecord, IndexMap, MnaProblem
-from .device_models import diode_current_expression, source_expression
+from .device_models import diode_current_expression, mos_level1_current_expression, source_expression
 from .errors import error_handler
 from .utils import format_voltage_labels, parse_value
 
@@ -110,11 +111,15 @@ def build_mna_problem(circuit: CircuitIR, gmin: float = 0.0) -> MnaProblem:
 
     G = np.zeros((size, size), dtype=float)
     C = np.zeros((size, size), dtype=float)
+    G_sparse = dok_matrix((size, size), dtype=float)
+    C_sparse = dok_matrix((size, size), dtype=float)
     f_str = np.full((size, 1), "0", dtype=object)
+    solver_f_str = np.full((size, 1), "0", dtype=object)
     b_dc = np.zeros((size, 1), dtype=float)
     b_ac = np.zeros((size, 1), dtype=complex)
     b_time_str = np.full((size, 1), "0", dtype=object)
     controlling_branch_map: dict[str, int] = {}
+    level1_mos_devices: list[dict[str, float | int | str]] = []
 
     def get_index(node_name: str | None) -> int:
         if node_name in {None, "0"}:
@@ -126,14 +131,19 @@ def build_mna_problem(circuit: CircuitIR, gmin: float = 0.0) -> MnaProblem:
             error_handler(f"NETLIST_FATAL: Unknown controlling branch '{branch_name}'.")
         return index_map.branch_to_index[branch_name]
 
+    def add_entry(matrix: np.ndarray, row: int, col: int, value: float) -> None:
+        if row == -1 or col == -1 or value == 0.0:
+            return
+        matrix[row, col] += value
+        sparse_matrix = G_sparse if matrix is G else C_sparse if matrix is C else None
+        if sparse_matrix is not None:
+            sparse_matrix[row, col] = sparse_matrix[row, col] + value
+
     def stamp(matrix: np.ndarray, node_j: int, node_k: int, value: float) -> None:
-        if node_j != -1:
-            matrix[node_j, node_j] += value
-        if node_k != -1:
-            matrix[node_k, node_k] += value
-        if node_j != -1 and node_k != -1:
-            matrix[node_j, node_k] -= value
-            matrix[node_k, node_j] -= value
+        add_entry(matrix, node_j, node_j, value)
+        add_entry(matrix, node_k, node_k, value)
+        add_entry(matrix, node_j, node_k, -value)
+        add_entry(matrix, node_k, node_j, -value)
 
     def stamp_symbolic_rhs(vector: np.ndarray, index: int, expression: str, positive: bool = True) -> None:
         if index == -1:
@@ -144,30 +154,28 @@ def build_mna_problem(circuit: CircuitIR, gmin: float = 0.0) -> MnaProblem:
         else:
             vector[index, 0] += f" {sign} ({expression})"
 
+    def stamp_nonlinear_current(vector: np.ndarray, node_p: int, node_n: int, expression: str) -> None:
+        stamp_symbolic_rhs(vector, node_p, expression, positive=True)
+        stamp_symbolic_rhs(vector, node_n, expression, positive=False)
+
     def stamp_numeric_rhs(vector: np.ndarray, index: int, value: complex, positive: bool = True) -> None:
         if index == -1:
             return
         vector[index] += value if positive else -value
 
     def stamp_voltage_source(kv: int, j: int, k: int) -> None:
-        if j != -1:
-            G[j, kv] += 1
-            G[kv, j] += 1
-        if k != -1:
-            G[k, kv] -= 1
-            G[kv, k] -= 1
+        add_entry(G, j, kv, 1.0)
+        add_entry(G, kv, j, 1.0)
+        add_entry(G, k, kv, -1.0)
+        add_entry(G, kv, k, -1.0)
 
     def stamp_vccs_matrix(matrix: np.ndarray, out_p: int, out_n: int, ctrl_p: int, ctrl_n: int, gain: float) -> None:
         if gain == 0.0:
             return
-        if out_p != -1 and ctrl_p != -1:
-            matrix[out_p, ctrl_p] += gain
-        if out_p != -1 and ctrl_n != -1:
-            matrix[out_p, ctrl_n] -= gain
-        if out_n != -1 and ctrl_p != -1:
-            matrix[out_n, ctrl_p] -= gain
-        if out_n != -1 and ctrl_n != -1:
-            matrix[out_n, ctrl_n] += gain
+        add_entry(matrix, out_p, ctrl_p, gain)
+        add_entry(matrix, out_p, ctrl_n, -gain)
+        add_entry(matrix, out_n, ctrl_p, -gain)
+        add_entry(matrix, out_n, ctrl_n, gain)
 
     for component in components:
         comp_type = component.type
@@ -183,7 +191,9 @@ def build_mna_problem(circuit: CircuitIR, gmin: float = 0.0) -> MnaProblem:
         elif comp_type == "L":
             branch_idx = get_branch_index(component.name)
             stamp_voltage_source(branch_idx, j, k)
-            C[branch_idx, branch_idx] += parse_value(component.value or "0")
+            # MNA form is C dx/dt + G x = b. For branch current flowing from
+            # node1 to node2, an inductor satisfies v(node1)-v(node2)-L di/dt=0.
+            add_entry(C, branch_idx, branch_idx, -parse_value(component.value or "0"))
             controlling_branch_map[component.name] = branch_idx
         elif comp_type == "I":
             if (component.subtype or "").upper() == "DC":
@@ -236,32 +246,27 @@ def build_mna_problem(circuit: CircuitIR, gmin: float = 0.0) -> MnaProblem:
             stamp_voltage_source(branch_idx, j, k)
             controlling_branch_map[component.name] = branch_idx
             if c1 != -1:
-                G[branch_idx, c1] -= gain
+                add_entry(G, branch_idx, c1, -gain)
             if c2 != -1:
-                G[branch_idx, c2] += gain
+                add_entry(G, branch_idx, c2, gain)
         elif comp_type == "CCCS":
             control_branch = get_branch_index(component.ctrl_source or "")
             gain = parse_value(component.value or "0")
-            if j != -1:
-                G[j, control_branch] += gain
-            if k != -1:
-                G[k, control_branch] -= gain
+            add_entry(G, j, control_branch, gain)
+            add_entry(G, k, control_branch, -gain)
         elif comp_type == "CCVS":
             branch_idx = get_branch_index(component.name)
             control_branch = get_branch_index(component.ctrl_source or "")
             gain = parse_value(component.value or "0")
             stamp_voltage_source(branch_idx, j, k)
             controlling_branch_map[component.name] = branch_idx
-            G[branch_idx, control_branch] -= gain
+            add_entry(G, branch_idx, control_branch, -gain)
         elif comp_type == "D":
             j_expr = f"x[{j}]" if j != -1 else "0"
             k_expr = f"x[{k}]" if k != -1 else "0"
             diode_expr = diode_current_expression(component, j_expr, k_expr)
-            if j != -1:
-                f_str[j, 0] = diode_expr if f_str[j, 0] == "0" else f"{f_str[j, 0]} + {diode_expr}"
-            if k != -1:
-                term = f"-({diode_expr})"
-                f_str[k, 0] = term if f_str[k, 0] == "0" else f"{f_str[k, 0]} - ({diode_expr})"
+            stamp_nonlinear_current(f_str, j, k, diode_expr)
+            stamp_nonlinear_current(solver_f_str, j, k, diode_expr)
             if gmin > 0.0:
                 stamp(G, j, k, gmin)
         elif comp_type in {"QNPN", "QPNP"}:
@@ -289,6 +294,35 @@ def build_mna_problem(circuit: CircuitIR, gmin: float = 0.0) -> MnaProblem:
             gate = get_index(component.ctrl_node1)
             source = k
             drain = j
+            if component.metadata.get("model") == "level1":
+                drain_expr = f"x[{drain}]" if drain != -1 else "0"
+                gate_expr = f"x[{gate}]" if gate != -1 else "0"
+                source_expr = f"x[{source}]" if source != -1 else "0"
+                mos_expr = mos_level1_current_expression(component, drain_expr, gate_expr, source_expr)
+                c_gs = parse_value(component.metadata.get("cgs", "0"))
+                c_gd = parse_value(component.metadata.get("cgd", "0"))
+                g_ds_floor = parse_value(component.metadata.get("gds_floor", "1e-12"))
+                stamp_nonlinear_current(f_str, drain, source, mos_expr)
+                level1_mos_devices.append(
+                    {
+                        "type": comp_type,
+                        "drain": drain,
+                        "gate": gate,
+                        "source": source,
+                        "beta": parse_value(component.value or "1m"),
+                        "vth": abs(parse_value(component.value2 or "0.4")),
+                        "lambda": parse_value(component.value3 or "0"),
+                    }
+                )
+                if g_ds_floor > 0.0:
+                    stamp(G, drain, source, g_ds_floor)
+                if c_gs > 0.0:
+                    stamp(C, gate, source, c_gs)
+                if c_gd > 0.0:
+                    stamp(C, gate, drain, c_gd)
+                if gmin > 0.0:
+                    stamp(G, drain, source, gmin)
+                continue
             gm = parse_value(component.value or "5m")
             r_o = parse_value(component.value2 or "50k")
             c_gs = parse_value(component.value3 or "5p")
@@ -312,31 +346,37 @@ def build_mna_problem(circuit: CircuitIR, gmin: float = 0.0) -> MnaProblem:
             stamp_vccs_matrix(G, drain, source, -1, source, g_mb)
         elif comp_type == "B":
             expression = component.value or "0"
-            if j != -1:
-                f_str[j, 0] = expression if f_str[j, 0] == "0" else f"{f_str[j, 0]} + ({expression})"
-            if k != -1:
-                term = f"-({expression})"
-                f_str[k, 0] = term if f_str[k, 0] == "0" else f"{f_str[k, 0]} - ({expression})"
+            stamp_nonlinear_current(f_str, j, k, expression)
+            stamp_nonlinear_current(solver_f_str, j, k, expression)
         else:
             error_handler(f"NETLIST_FATAL: Unsupported device type '{comp_type}'.")
 
     labels = format_voltage_labels(index_map.node_names, index_map.branch_names)
+    G_csr = G_sparse.tocsr()
+    C_csr = C_sparse.tocsr()
     metadata = {
         "num_nodes": num_nodes,
         "num_branches": num_branches,
         "labels": labels,
         "controlling_branch_map": controlling_branch_map,
+        "matrix_storage": "dense+csr",
+        "G_nnz": int(G_csr.nnz),
+        "C_nnz": int(C_csr.nnz),
     }
 
     return MnaProblem(
         G=G,
         C=C,
+        G_sparse=G_csr,
+        C_sparse=C_csr,
         f_str=f_str,
+        solver_f_str=solver_f_str,
         b_dc=b_dc,
         b_ac=b_ac,
         b_time_str=b_time_str,
         index_map=index_map,
         components=components,
+        level1_mos_devices=level1_mos_devices,
         gmin=gmin,
         metadata=metadata,
     )

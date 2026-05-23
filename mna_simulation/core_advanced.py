@@ -7,7 +7,7 @@ import numpy as np
 from .api.contracts import AnalysisMode, AnalysisOptions, MnaProblem, SimulationResult, SpectrumResult, WaveformResult
 from .errors import error_handler
 from .mna_builder import build_mna_problem
-from .solvers import reconstruct_time_domain, solve_harmonic_balance
+from .solvers import describe_krylov_choice, reconstruct_time_domain, solve_harmonic_balance
 from .utils import parse_value
 
 
@@ -55,11 +55,58 @@ def run_advanced_analysis(problem: MnaProblem, options: AnalysisOptions) -> Simu
         harmonics = min_harmonics_needed + 4
 
     omega_0 = 2 * np.pi * f0
-    x_bar = solve_harmonic_balance(problem, omega_0=omega_0, H=harmonics, max_iter=options.max_iter, tol=options.f_tol)
+    krylov_stats: list[dict[str, object]] | None = [] if options.use_krylov else None
+    x_bar = solve_harmonic_balance(
+        problem,
+        omega_0=omega_0,
+        H=harmonics,
+        max_iter=options.max_iter,
+        tol=options.f_tol,
+        use_krylov=options.use_krylov,
+        krylov_tol=options.krylov_tol,
+        krylov_max_iter=options.krylov_max_iter,
+        krylov_restart=options.krylov_restart,
+        krylov_rank=options.krylov_rank,
+        krylov_method=options.krylov_method,
+        krylov_stats=krylov_stats,
+    )
 
     labels = problem.metadata.get("labels", [])
     metadata = dict(problem.metadata)
     metadata.update({"base_frequency_hz": f0, "harmonics": harmonics})
+    if options.use_krylov:
+        freq_dim = 2 * harmonics + 1
+        choice = describe_krylov_choice(
+            np.zeros((len(problem.G) * freq_dim, len(problem.G) * freq_dim)),
+            rank=options.krylov_rank,
+            fallback_restart=options.krylov_restart,
+            max_iter=options.krylov_max_iter,
+            method=options.krylov_method,
+        )
+        last = krylov_stats[-1] if krylov_stats else choice
+        methods = sorted({str(entry.get("method", "")) for entry in (krylov_stats or [choice]) if entry.get("method")})
+        metadata.update(
+            {
+                "linear_solver": "krylov",
+                "krylov_matrix_kind": last.get("matrix_kind", choice["matrix_kind"]),
+                "krylov_policy": "manual override allowed; auto: positive-definite=CG, symmetric=MINRES/CR, general=Arnoldi/GMRES",
+                "krylov_requested_method": last.get("requested_method", options.krylov_method),
+                "krylov_method": last.get("method"),
+                "krylov_engine": last.get("engine", "python"),
+                "krylov_methods": methods,
+                "krylov_matrix_dimension": last.get("matrix_dimension", choice["matrix_dimension"]),
+                "matrix_nnz": last.get("matrix_nnz"),
+                "matrix_density": last.get("matrix_density"),
+                "krylov_operator_storage": last.get("operator_storage"),
+                "krylov_rank_mode": last.get("rank_mode", choice["rank_mode"]),
+                "krylov_resolved_rank": last.get("resolved_rank", choice["resolved_rank"]),
+                "krylov_iteration_budget": last.get("iteration_budget", choice["iteration_budget"]),
+                "krylov_iterations": sum(int(entry.get("iterations", 0) or 0) for entry in (krylov_stats or [])),
+                "krylov_solve_count": len(krylov_stats or []),
+                "krylov_converged": all(bool(entry.get("converged")) for entry in (krylov_stats or [])) if krylov_stats else None,
+                "krylov_used_direct_fallback": any(bool(entry.get("used_direct_fallback")) for entry in (krylov_stats or [])),
+            }
+        )
 
     if options.hb_time_window is not None:
         t_plot = np.linspace(0, options.hb_time_window, 2000)

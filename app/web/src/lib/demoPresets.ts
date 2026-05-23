@@ -21,7 +21,10 @@ const defaultAnalysis: AnalysisState = {
   dynSpeed: "1m",
   dynWindow: "5m",
   probeNodes: [],
-  continuous: false
+  krylov: false,
+  krylovRankMode: "auto",
+  krylovRank: 80,
+  krylovMethod: "auto"
 };
 
 function cloneAnalysis(overrides: Partial<AnalysisState>): AnalysisState {
@@ -275,4 +278,380 @@ const threeStageOpamp: SchematicPreset = (() => {
   };
 })();
 
-export const HIDDEN_DEMO_PRESETS: SchematicPreset[] = [ceAmplifier, threeStageOpamp];
+const largeSramCircuit: SchematicPreset = (() => {
+  const rows = 10;
+  const cols = 10;
+  const selectedRow = 3;
+  const selectedCol = 4;
+  const components: CanvasComponent[] = [];
+  const wires: CanvasWire[] = [];
+  let nodeIndex = 0;
+  let wireIndex = 0;
+  const vHigh = "1.2";
+  const mosCap = { cgs: "2f", cgd: "1f" };
+  const wlSelectedExpr = `Piecewise((0, t < 1e-9), (${vHigh}, t < 2.5e-9), (0, t < 4.5e-9), (${vHigh}, t < 6e-9), (0, True))`;
+  const writeExpr = `Piecewise((0, t < 1e-9), (${vHigh}, t < 2.5e-9), (0, True))`;
+  const writeBarExpr = `Piecewise((${vHigh}, t < 1e-9), (0, t < 2.5e-9), (${vHigh}, True))`;
+  const prechargeExpr = `Piecewise((0, t < 1e-9), (${vHigh}, t < 3.5e-9), (0, t < 4.5e-9), (${vHigh}, True))`;
+
+  const addComponent = (
+    partial: Omit<CanvasComponent, "rotation"> & Partial<Pick<CanvasComponent, "rotation">>
+  ) => {
+    const component = mk(partial);
+    components.push(component);
+    return component.id;
+  };
+  const addNode = (name: string, x: number, y: number) =>
+    addComponent({
+      id: `node-${name.replace(/[^a-z0-9_]/gi, "_")}-${nodeIndex++}`,
+      type: "NODE",
+      name,
+      value: "node",
+      x,
+      y
+    });
+  const connect = (componentId: string, pin: string, nodeId: string) => {
+    wires.push(pinWire(`sram-w-${wireIndex++}`, componentId, pin, nodeId, "n"));
+  };
+  const addSource = (id: string, name: string, node: string, subtype: string, value: string, expr: string | undefined, x: number, y: number) => {
+    const src = addComponent({ id, type: "V", name, value, subtype, value2: expr, x, y });
+    const p = addNode(node, x, y - 36);
+    const n = addNode("gnd", x, y + 36);
+    connect(src, "p", p);
+    connect(src, "n", n);
+    return p;
+  };
+  const addLevel1Mos = (
+    id: string,
+    type: "NMOS" | "PMOS",
+    name: string,
+    beta: string,
+    x: number,
+    y: number,
+    rotation: 0 | 90 | 180 | 270 = 0,
+    caps: Record<string, string> = mosCap
+  ) =>
+    addComponent({
+      id,
+      type,
+      name,
+      value: beta,
+      value2: "0.4",
+      value3: "0.02",
+      metadata: { model: "level1", ...caps },
+      x,
+      y,
+      rotation
+    });
+  const addTwoTerminal = (
+    id: string,
+    type: "R" | "C",
+    name: string,
+    value: string,
+    pNode: string,
+    nNode: string,
+    x: number,
+    y: number,
+    rotation: 0 | 90 | 180 | 270 = 0
+  ) => {
+    const c = addComponent({ id, type, name, value, x, y, rotation });
+    connect(c, "p", pNode);
+    connect(c, "n", nNode);
+    return c;
+  };
+
+  const vddSource = addComponent({
+    id: "sram-vdd-src",
+    type: "V",
+    name: "VDD",
+    value: vHigh,
+    subtype: "DC",
+    x: 100,
+    y: 150
+  });
+  const vddNode = addNode("vdd", 100, 114);
+  const globalGndNode = addNode("gnd", 100, 186);
+  const globalGnd = addComponent({ id: "sram-gnd", type: "GND", name: "GND0", value: "0", x: 100, y: 246 });
+  connect(vddSource, "p", vddNode);
+  connect(vddSource, "n", globalGndNode);
+  wires.push(pinWire(`sram-w-${wireIndex++}`, globalGndNode, "n", globalGnd, "g"));
+
+  const originX = 260;
+  const originY = 250;
+  const cellW = 170;
+  const cellH = 125;
+
+  addSource("sram-vpch", "VPCH", "pch", "FUNC", "0", prechargeExpr, 100, 330);
+  addSource("sram-vwr", "VWR", "wr", "FUNC", "0", writeExpr, 100, 430);
+  addSource("sram-vwrb", "VWRB", "wr_b", "FUNC", "0", writeBarExpr, 100, 530);
+
+  for (let col = 0; col < cols; col++) {
+    const qX = originX + col * cellW;
+    const qbX = qX + 80;
+    const bl = addNode(`bl_${col}`, qX - 72, 118);
+    const blb = addNode(`blb_${col}`, qbX + 72, 118);
+    const vddBl = addNode("vdd", qX - 72, 46);
+    const vddBlb = addNode("vdd", qbX + 72, 46);
+    const pch = addNode("pch", qX, 58);
+    const pchb = addNode("pch", qbX, 58);
+    const gndBl = addNode("gnd", qX - 32, 154);
+    const gndBlb = addNode("gnd", qbX + 32, 154);
+    const preBl = addLevel1Mos(`sram-mpch-bl-${col}`, "PMOS", `MPCHBL${col}`, "3m", qX - 72, 82);
+    const preBlb = addLevel1Mos(`sram-mpch-blb-${col}`, "PMOS", `MPCHBLB${col}`, "3m", qbX + 72, 82);
+    connect(preBl, "s", vddBl);
+    connect(preBl, "d", bl);
+    connect(preBl, "g", pch);
+    connect(preBlb, "s", vddBlb);
+    connect(preBlb, "d", blb);
+    connect(preBlb, "g", pchb);
+    addTwoTerminal(`sram-cbl-${col}`, "C", `CBL${col}`, "20f", bl, gndBl, qX - 32, 136, 90);
+    addTwoTerminal(`sram-cblb-${col}`, "C", `CBLB${col}`, "20f", blb, gndBlb, qbX + 32, 136, 90);
+  }
+
+  for (let row = 0; row < rows; row++) {
+    const y = originY + row * cellH;
+    if (row === selectedRow) {
+      addSource(`sram-vwl-${row}`, `VWL${row}`, `wl_${row}`, "FUNC", "0", wlSelectedExpr, 100, y);
+    } else {
+      addSource(`sram-vwl-${row}`, `VWL${row}`, `wl_${row}`, "DC", "0", undefined, 100, y);
+    }
+  }
+
+  const selectedBl = addNode(`bl_${selectedCol}`, originX + selectedCol * cellW - 72, 176);
+  const selectedBlb = addNode(`blb_${selectedCol}`, originX + selectedCol * cellW + 152, 176);
+  const writeHighVdd = addNode("vdd", originX + selectedCol * cellW - 112, 176);
+  const writeLowGnd = addNode("gnd", originX + selectedCol * cellW + 192, 176);
+  const wr = addNode("wr", originX + selectedCol * cellW + 152, 226);
+  const wrb = addNode("wr_b", originX + selectedCol * cellW - 72, 226);
+  const writeHigh = addLevel1Mos("sram-mwrite-bl", "PMOS", "MWRBL", "8m", originX + selectedCol * cellW - 72, 210);
+  const writeLow = addLevel1Mos("sram-mwrite-blb", "NMOS", "MWRBLB", "8m", originX + selectedCol * cellW + 152, 210);
+  connect(writeHigh, "s", writeHighVdd);
+  connect(writeHigh, "d", selectedBl);
+  connect(writeHigh, "g", wrb);
+  connect(writeLow, "d", selectedBlb);
+  connect(writeLow, "s", writeLowGnd);
+  connect(writeLow, "g", wr);
+
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      const x = originX + col * cellW;
+      const y = originY + row * cellH;
+      const qX = x;
+      const qbX = x + 80;
+      const cell = `${row}_${col}`;
+
+      const q = addNode(`q_${cell}`, qX, y);
+      const qb = addNode(`qb_${cell}`, qbX, y);
+      const vddLeft = addNode("vdd", qX, y - 72);
+      const vddRight = addNode("vdd", qbX, y - 72);
+      const gndLeft = addNode("gnd", qX, y + 72);
+      const gndRight = addNode("gnd", qbX, y + 72);
+      const bl = addNode(`bl_${col}`, qX - 72, y);
+      const blb = addNode(`blb_${col}`, qbX + 72, y);
+      const wlLeft = addNode(`wl_${row}`, qX - 36, y - 36);
+      const wlRight = addNode(`wl_${row}`, qbX + 36, y + 36);
+
+      const pLeft = addLevel1Mos(`sram-mp-q-${cell}`, "PMOS", `MPQ${row}_${col}`, "0.7m", qX, y - 36);
+      const pRight = addLevel1Mos(`sram-mp-qb-${cell}`, "PMOS", `MPQB${row}_${col}`, "0.7m", qbX, y - 36);
+      const nLeft = addLevel1Mos(`sram-mn-q-${cell}`, "NMOS", `MNQ${row}_${col}`, "1.8m", qX, y + 36);
+      const nRight = addLevel1Mos(`sram-mn-qb-${cell}`, "NMOS", `MNQB${row}_${col}`, "1.8m", qbX, y + 36);
+      const accessLeft = addLevel1Mos(`sram-max-q-${cell}`, "NMOS", `MAXQ${row}_${col}`, "2.5m", qX - 36, y, 90);
+      const accessRight = addLevel1Mos(`sram-max-qb-${cell}`, "NMOS", `MAXQB${row}_${col}`, "2.5m", qbX + 36, y, 270);
+
+      connect(pLeft, "s", vddLeft);
+      connect(pLeft, "d", q);
+      connect(pLeft, "g", qb);
+      connect(nLeft, "d", q);
+      connect(nLeft, "s", gndLeft);
+      connect(nLeft, "g", qb);
+
+      connect(pRight, "s", vddRight);
+      connect(pRight, "d", qb);
+      connect(pRight, "g", q);
+      connect(nRight, "d", qb);
+      connect(nRight, "s", gndRight);
+      connect(nRight, "g", q);
+
+      connect(accessLeft, "d", q);
+      connect(accessLeft, "s", bl);
+      connect(accessLeft, "g", wlLeft);
+      connect(accessRight, "d", qb);
+      connect(accessRight, "s", blb);
+      connect(accessRight, "g", wlRight);
+
+      const gndCapQ = addNode("gnd", qX - 16, y + 16);
+      const gndCapQb = addNode("gnd", qbX + 16, y + 16);
+      addTwoTerminal(`sram-cq-${cell}`, "C", `CQ${row}_${col}`, "4f", q, gndCapQ, qX - 16, y + 18, 90);
+      addTwoTerminal(`sram-cqb-${cell}`, "C", `CQB${row}_${col}`, "4f", qb, gndCapQb, qbX + 16, y + 18, 90);
+
+      const qStartsHigh = row === selectedRow && col === selectedCol ? false : (row + col) % 2 === 0;
+      const qBiasNode = addNode(qStartsHigh ? "vdd" : "gnd", qX - 18, y - 18);
+      const qbBiasNode = addNode(qStartsHigh ? "gnd" : "vdd", qbX + 18, y - 18);
+      addTwoTerminal(`sram-rinit-q-${cell}`, "R", `RINITQ${row}_${col}`, "200Meg", q, qBiasNode, qX - 18, y - 18, 90);
+      addTwoTerminal(`sram-rinit-qb-${cell}`, "R", `RINITQB${row}_${col}`, "200Meg", qb, qbBiasNode, qbX + 18, y - 18, 90);
+    }
+  }
+
+  return {
+    id: "large-sram-circuit",
+    title: "Large SRAM Circuit",
+    description: "Editable 10x10 6T Level-1 MOS SRAM transient demo that writes, holds, precharges, and reads row 3 column 4.",
+    analysis: cloneAnalysis({
+      mode: "tran",
+      tStop: "6n",
+      tStep: "0.25n",
+      probeNodes: ["V(q_3_4)", "V(qb_3_4)", "V(bl_4)", "V(blb_4)", "V(wl_3)"],
+      krylov: false,
+      krylovRankMode: "auto"
+    }),
+    components,
+    wires
+  };
+})();
+
+const largeRlcMesh: SchematicPreset = (() => {
+  const size = 23;
+  const components: CanvasComponent[] = [];
+  const wires: CanvasWire[] = [];
+  let nodeIndex = 0;
+  let wireIndex = 0;
+
+  const addComponent = (
+    partial: Omit<CanvasComponent, "rotation"> & Partial<Pick<CanvasComponent, "rotation">>
+  ) => {
+    const component = mk(partial);
+    components.push(component);
+    return component.id;
+  };
+  const addNode = (name: string, x: number, y: number) =>
+    addComponent({
+      id: `rlc-node-${name.replace(/[^a-z0-9_]/gi, "_")}-${nodeIndex++}`,
+      type: "NODE",
+      name,
+      value: "node",
+      x,
+      y
+    });
+  const connect = (componentId: string, pin: string, nodeId: string) => {
+    wires.push(pinWire(`rlc-w-${wireIndex++}`, componentId, pin, nodeId, "n"));
+  };
+  const addTwoTerminal = (
+    id: string,
+    type: "R" | "C" | "L",
+    name: string,
+    value: string,
+    pNode: string,
+    nNode: string,
+    x: number,
+    y: number,
+    rotation: 0 | 90 | 180 | 270 = 0
+  ) => {
+    const componentId = addComponent({ id, type, name, value, x, y, rotation });
+    connect(componentId, "p", pNode);
+    connect(componentId, "n", nNode);
+    return componentId;
+  };
+
+  const originX = 260;
+  const originY = 170;
+  const dx = 70;
+  const dy = 54;
+  const nodeIds: string[][] = [];
+
+  const gndNode = addNode("gnd", 110, 210);
+  const gnd = addComponent({ id: "rlc-gnd", type: "GND", name: "GND0", value: "0", x: 110, y: 250 });
+  wires.push(pinWire(`rlc-w-${wireIndex++}`, gndNode, "n", gnd, "g"));
+
+  for (let row = 0; row < size; row++) {
+    nodeIds[row] = [];
+    for (let col = 0; col < size; col++) {
+      nodeIds[row][col] = addNode(`n_${row}_${col}`, originX + col * dx, originY + row * dy);
+    }
+  }
+
+  const src = addComponent({
+    id: "rlc-iin",
+    type: "I",
+    name: "IIN",
+    value: "1m",
+    subtype: "STEP",
+    value2: "20n",
+    x: 170,
+    y: 170
+  });
+  connect(src, "p", nodeIds[0][0]);
+  connect(src, "n", gndNode);
+
+  for (let row = 0; row < size; row++) {
+    for (let col = 0; col < size; col++) {
+      const node = nodeIds[row][col];
+      const x = originX + col * dx;
+      const y = originY + row * dy;
+      addTwoTerminal(`rlc-c-${row}-${col}`, "C", `C_${row}_${col}`, "200p", node, gndNode, x + 18, y + 18, 90);
+      addTwoTerminal(`rlc-rg-${row}-${col}`, "R", `RG_${row}_${col}`, "50Meg", node, gndNode, x - 18, y + 18, 90);
+      if (col + 1 < size) {
+        addTwoTerminal(
+          `rlc-rh-${row}-${col}`,
+          "R",
+          `R_H_${row}_${col}`,
+          "25",
+          node,
+          nodeIds[row][col + 1],
+          x + dx / 2,
+          y,
+          0
+        );
+      }
+      if (row + 1 < size) {
+        addTwoTerminal(
+          `rlc-lv-${row}-${col}`,
+          "L",
+          `L_V_${row}_${col}`,
+          "20n",
+          node,
+          nodeIds[row + 1][col],
+          x,
+          y + dy / 2,
+          90
+        );
+      }
+    }
+  }
+
+  addTwoTerminal(
+    "rlc-rload",
+    "R",
+    "RLOAD",
+    "50",
+    nodeIds[size - 1][size - 1],
+    gndNode,
+    originX + (size - 1) * dx + 54,
+    originY + (size - 1) * dy,
+    90
+  );
+
+  return {
+    id: "large-rlc-mesh",
+    title: "Large RLC Mesh",
+    description:
+      "Editable 23x23 distributed RLC mesh with 1035 MNA unknowns and a sparse Backward Euler operator for Krylov/MINRES benchmarking.",
+    analysis: cloneAnalysis({
+      mode: "tran",
+      tStop: "200n",
+      tStep: "10n",
+      probeNodes: ["V(n_0_0)", "V(n_11_11)", "V(n_22_22)", "I(L_V_10_11)"],
+      krylov: true,
+      krylovRankMode: "auto",
+      krylovRank: 518
+    }),
+    components,
+    wires
+  };
+})();
+
+export const HIDDEN_DEMO_PRESETS: SchematicPreset[] = [ceAmplifier, threeStageOpamp, largeSramCircuit, largeRlcMesh];
+
+export const DEMO_MENU_GROUPS: { title: string; presets: SchematicPreset[] }[] = [
+  { title: "Amplifier Demos", presets: [ceAmplifier, threeStageOpamp] },
+  { title: "Large Scale Circuits", presets: [largeSramCircuit, largeRlcMesh] }
+];

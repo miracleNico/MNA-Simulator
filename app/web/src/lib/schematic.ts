@@ -27,6 +27,7 @@ export type DeviceType =
   | "SUBCKT";
 
 export type BasicAnalysisMode = "op" | "tran" | "ac" | "hb" | "dyn";
+export type KrylovMethod = "auto" | "arnoldi_gmres" | "conjugate_residual" | "conjugate_gradient";
 
 export type Rotation = 0 | 90 | 180 | 270;
 
@@ -76,8 +77,14 @@ export type AnalysisState = {
   dynWindow: string;
   /** Selected nodes for .tran result display (empty = all). */
   probeNodes: string[];
-  /** If true, probe-triggered streams loop indefinitely (infinite duration). */
-  continuous: boolean;
+  /** If true, backend auto-selects a Krylov linear solve path. */
+  krylov: boolean;
+  /** Auto = backend uses 50% of the actual generated matrix dimension. */
+  krylovRankMode: "auto" | "manual";
+  /** Manual Krylov rank / iteration budget. Must be a positive integer. */
+  krylovRank: number;
+  /** Auto or explicit Krylov algorithm route. */
+  krylovMethod: KrylovMethod;
 };
 
 /**
