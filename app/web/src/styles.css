@@ -597,6 +597,107 @@ textarea {
   height: 100%;
 }
 
+.resultTileBody {
+  overflow: auto;
+  padding: 12px;
+  color: var(--text-1);
+  font-size: 12px;
+}
+
+.resultSection + .resultSection {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line-1);
+}
+
+.resultSection__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+  color: var(--text-1);
+  font-weight: 600;
+}
+
+.resultSection__header span:last-child {
+  color: var(--text-3);
+  font-weight: 500;
+  font-size: 11px;
+}
+
+.resultTableWrap {
+  overflow: auto;
+  border: 1px solid var(--line-1);
+  background: var(--bg-0);
+}
+
+.opTableWrap {
+  max-height: 190px;
+}
+
+.deviceOpTableWrap {
+  max-height: 220px;
+}
+
+.matrixTableWrap {
+  max-height: 260px;
+}
+
+.resultTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.resultTable th,
+.resultTable td {
+  padding: 5px 7px;
+  border-bottom: 1px solid var(--line-1);
+  border-right: 1px solid var(--line-1);
+  white-space: nowrap;
+  text-align: right;
+}
+
+.resultTable th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg-2);
+  color: var(--text-2);
+  font-weight: 600;
+}
+
+.resultTable tbody th {
+  left: 0;
+  z-index: 2;
+  text-align: left;
+}
+
+.resultTable td {
+  color: var(--text-1);
+}
+
+.matrixBlock + .matrixBlock {
+  margin-top: 12px;
+}
+
+.matrixBlock__title {
+  margin-bottom: 5px;
+  color: var(--accent-2);
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.resultNote,
+.resultEmpty {
+  color: var(--text-3);
+  font-size: 11px;
+  margin-bottom: 6px;
+}
+
 .tile__resize {
   position: absolute;
   width: 14px;
@@ -688,6 +789,96 @@ textarea {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.helpDialog {
+  width: min(920px, calc(100vw - 40px));
+  max-height: min(820px, calc(100vh - 48px));
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
+
+.helpDialog__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 20px 14px;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--line-1);
+}
+
+.helpDialog__header h2 {
+  margin: 0;
+  font-size: 20px;
+  line-height: 1.2;
+  letter-spacing: 0;
+}
+
+.helpDialog__header p {
+  margin: 6px 0 0;
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.helpDialog__close {
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  border: 1px solid var(--line-2);
+  background: var(--bg-0);
+  color: var(--text-1);
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.helpDialog__close:hover {
+  border-color: var(--accent);
+  color: var(--accent-2);
+}
+
+.helpDialog__body {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 14px;
+  padding: 16px 20px 18px;
+  overflow: auto;
+}
+
+.helpSection {
+  border: 1px solid var(--line-1);
+  background: var(--bg-0);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+
+.helpSection h3 {
+  margin: 0 0 8px;
+  color: var(--accent-2);
+  font-size: 14px;
+  line-height: 1.3;
+}
+
+.helpSection ul {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--text-1);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.helpSection li + li {
+  margin-top: 6px;
+}
+
+.helpDialog .modalActions {
+  padding: 12px 20px 16px;
+  border-top: 1px solid var(--line-1);
+  background: var(--bg-1);
 }
 
 /* ---------- Scrollbar polish ---------- */

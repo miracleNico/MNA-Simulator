@@ -48,6 +48,7 @@ export type CanvasComponent = {
   x: number;
   y: number;
   rotation: Rotation;
+  mirrored?: boolean;
 };
 
 /** Wire endpoint may be anchored to a component pin or float as a free point. */
@@ -190,10 +191,10 @@ const DEFAULT_VALUES: Record<DeviceType, string> = {
   VCCS: "1",
   CCCS: "1",
   CCVS: "1",
-  QNPN: "40m", // gm (S)
-  QPNP: "40m",
-  NMOS: "5m",
-  PMOS: "5m",
+  QNPN: "1e-15", // Level-1 IS (A)
+  QPNP: "1e-15",
+  NMOS: "1m", // Level-1 beta
+  PMOS: "1m",
   LABEL: "node",
   NODE: "node",
   SUBCKT: "1"
@@ -244,6 +245,11 @@ export function rotatePinOffset(offset: PinOffset, rotation: Rotation): PinOffse
   }
 }
 
+function transformPinOffset(offset: PinOffset, component: CanvasComponent): PinOffset {
+  const mirrored = component.mirrored ? { dx: -offset.dx, dy: offset.dy } : offset;
+  return rotatePinOffset(mirrored, component.rotation);
+}
+
 export function getPinCoordinates(component: CanvasComponent, pin: string): { x: number; y: number } {
   if (component.type === "SUBCKT") {
     // Distribute pins around a rounded rectangle.
@@ -266,14 +272,14 @@ export function getPinCoordinates(component: CanvasComponent, pin: string): { x:
     } else {
       off = { dx: -halfW + spacing * (slot + 1), dy: halfH };
     }
-    const rotated = rotatePinOffset(off, component.rotation);
+    const rotated = transformPinOffset(off, component);
     return { x: component.x + rotated.dx, y: component.y + rotated.dy };
   }
   const raw = DEVICE_PIN_OFFSETS[component.type]?.[pin];
   if (!raw) {
     return { x: component.x, y: component.y };
   }
-  const rotated = rotatePinOffset(raw, component.rotation);
+  const rotated = transformPinOffset(raw, component);
   return { x: component.x + rotated.dx, y: component.y + rotated.dy };
 }
 
@@ -337,18 +343,18 @@ export function createDefaultComponent(
     value: DEFAULT_VALUES[type],
     subtype: type === "V" || type === "I" ? "DC" : undefined,
     value2:
-      type === "QNPN" || type === "QPNP" ? "2.5k" :
-      type === "NMOS" || type === "PMOS" ? "50k" :
+      type === "QNPN" || type === "QPNP" ? "150" :
+      type === "NMOS" || type === "PMOS" ? "0.7" :
       undefined,
     value3:
-      type === "QNPN" || type === "QPNP" ? "100k" :
-      type === "NMOS" || type === "PMOS" ? "5p" :
+      type === "QNPN" || type === "QPNP" ? "3" :
+      type === "NMOS" || type === "PMOS" ? "0.02" :
       undefined,
     metadata:
       type === "QNPN" || type === "QPNP"
-        ? { cpi: "8p", cmu: "3p", ccs: "0", rb: "0", re: "0" }
+        ? { model: "level1", vaf: "100", var: "25", cje: "4p", cjc: "2p", rb: "50", re: "0.5", rc: "5" }
         : type === "NMOS" || type === "PMOS"
-          ? { cgd: "1p", gmb: "0", cbs: "0", cbd: "0" }
+          ? { model: "level1", cgs: "2p", cgd: "1p" }
           : undefined,
     pins: type === "SUBCKT" ? ["in_1", "out_1"] : undefined,
     subcircuitId: type === "SUBCKT" ? "" : undefined,

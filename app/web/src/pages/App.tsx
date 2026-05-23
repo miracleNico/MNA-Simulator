@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { LeftPane } from "../components/LeftPane";
 import { PlotTile } from "../components/PlotTile";
+import { OpResultData, ResultTile } from "../components/ResultTile";
 import { ClipboardData, ProbeTarget, SchematicCanvas } from "../components/SchematicCanvas";
 import { Toolbar } from "../components/Toolbar";
 import { DEMO_MENU_GROUPS, HIDDEN_DEMO_PRESETS, SCHEMATIC_PRESETS } from "../lib/demoPresets";
@@ -16,6 +17,7 @@ import {
   buildSchematicPayload,
   normalizeNodeName
 } from "../lib/schematic";
+import { USER_GUIDE_SECTIONS } from "../lib/userGuide";
 
 const defaultAnalysis: AnalysisState = {
   mode: "op",
@@ -43,7 +45,9 @@ type TileRecord = {
   w: number;
   h: number;
   mode: "static" | "dyn";
+  view: "plot" | "op";
   data?: PlotData;
+  opData?: OpResultData;
   /** For dyn tiles: push function installed by the child. */
   push?: (t: number, values: number[], labels: string[]) => void;
   finalize?: () => void;
@@ -52,6 +56,14 @@ type TileRecord = {
   socket?: WebSocket;
   /** Rolling display window in sim seconds (dyn tiles only). */
   windowSeconds?: number;
+};
+
+type EditorSnapshot = {
+  levels: SchematicLevel[];
+  activeLevelId: string;
+  netlistMode: "schematic" | "netlist";
+  netlistText: string;
+  generatedNetlist: string;
 };
 
 const LIBRARY_ITEMS: DeviceType[] = [
@@ -64,6 +76,40 @@ const MAX_RESPONSE_PREVIEW_VALUES = 20000;
 
 function genId(prefix: string): string {
   return `${prefix}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
+function cloneWireEndpoint(endpoint: CanvasWire["start"]): CanvasWire["start"] {
+  return endpoint.kind === "pin"
+    ? { kind: "pin", componentId: endpoint.componentId, pin: endpoint.pin }
+    : { kind: "point", x: endpoint.x, y: endpoint.y };
+}
+
+function cloneLevel(level: SchematicLevel): SchematicLevel {
+  return {
+    ...level,
+    components: level.components.map((component) => ({
+      ...component,
+      pins: component.pins ? [...component.pins] : undefined,
+      metadata: component.metadata ? { ...component.metadata } : undefined
+    })),
+    wires: level.wires.map((wire) => ({
+      ...wire,
+      start: cloneWireEndpoint(wire.start),
+      end: cloneWireEndpoint(wire.end)
+    })),
+    pins: [...level.pins],
+    junctions: level.junctions?.map((junction) => ({ ...junction }))
+  };
+}
+
+function cloneLevels(levels: SchematicLevel[]): SchematicLevel[] {
+  return levels.map(cloneLevel);
+}
+
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  const tag = target.tagName.toLowerCase();
+  return tag === "input" || tag === "textarea" || tag === "select" || target.isContentEditable;
 }
 
 function krylovRequestOptions(analysis: AnalysisState): Record<string, unknown> {
@@ -230,6 +276,7 @@ export function App() {
   const [tiles, setTiles] = useState<TileRecord[]>([]);
   const [clipboard, setClipboard] = useState<ClipboardData | null>(null);
   const [demoOpen, setDemoOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
   const [statusElapsedMs, setStatusElapsedMs] = useState(0);
   const [statusIterations, setStatusIterations] = useState(0);
   const tileCounterRef = useRef(1);
@@ -238,6 +285,51 @@ export function App() {
   const statusIterationsRef = useRef(0);
   const statusIterationPaintRef = useRef(0);
   const activeDynamicTilesRef = useRef<Set<string>>(new Set());
+  const levelsRef = useRef<SchematicLevel[]>(levels);
+  const activeLevelIdRef = useRef(activeLevelId);
+  const netlistModeRef = useRef(netlistMode);
+  const netlistTextRef = useRef(netlistText);
+  const generatedNetlistRef = useRef(generatedNetlist);
+  const historyRef = useRef<EditorSnapshot[]>([]);
+
+  useEffect(() => {
+    levelsRef.current = levels;
+    activeLevelIdRef.current = activeLevelId;
+    netlistModeRef.current = netlistMode;
+    netlistTextRef.current = netlistText;
+    generatedNetlistRef.current = generatedNetlist;
+  }, [levels, activeLevelId, netlistMode, netlistText, generatedNetlist]);
+
+  const pushEditorHistory = useCallback(() => {
+    historyRef.current.push({
+      levels: cloneLevels(levelsRef.current),
+      activeLevelId: activeLevelIdRef.current,
+      netlistMode: netlistModeRef.current,
+      netlistText: netlistTextRef.current,
+      generatedNetlist: generatedNetlistRef.current
+    });
+    if (historyRef.current.length > 100) {
+      historyRef.current.shift();
+    }
+  }, []);
+
+  const undoEditor = useCallback(() => {
+    const snapshot = historyRef.current.pop();
+    if (!snapshot) {
+      setStatusMsg("Nothing to roll back.");
+      return;
+    }
+    setLevels(cloneLevels(snapshot.levels));
+    setActiveLevelId(snapshot.activeLevelId);
+    setNetlistMode(snapshot.netlistMode);
+    setNetlistText(snapshot.netlistText);
+    setGeneratedNetlist(snapshot.generatedNetlist);
+    setSelectedIds(new Set());
+    setPendingDevice(null);
+    setProbeMode(false);
+    setStatus("idle");
+    setStatusMsg("Rolled back last schematic edit.");
+  }, []);
 
   const stopStatusTimer = useCallback(() => {
     if (statusStartRef.current !== null) {
@@ -319,6 +411,7 @@ export function App() {
           "Editing the netlist will clear the current schematic hierarchy and switch this workspace to raw netlist mode. Continue?"
         );
         if (!ok) return false;
+        pushEditorHistory();
         setLevels([
           {
             id: "root",
@@ -342,7 +435,7 @@ export function App() {
       setNetlistText(nextText);
       return true;
     },
-    [netlistMode]
+    [netlistMode, pushEditorHistory]
   );
 
   /**
@@ -382,10 +475,71 @@ export function App() {
     setProbeMode(false);
   }, []);
 
+  const rotateSelection = useCallback(() => {
+    if (selectedIds.size === 0) return;
+    pushEditorHistory();
+    setActiveComponents((cur) =>
+      cur.map((component) =>
+        selectedIds.has(component.id)
+          ? { ...component, rotation: ((component.rotation + 90) % 360) as CanvasComponent["rotation"] }
+          : component
+      )
+    );
+    setStatusMsg("Rotated selection.");
+  }, [pushEditorHistory, selectedIds, setActiveComponents]);
+
+  const mirrorSelection = useCallback(() => {
+    if (selectedIds.size === 0) return;
+    pushEditorHistory();
+    setActiveComponents((cur) =>
+      cur.map((component) =>
+        selectedIds.has(component.id) ? { ...component, mirrored: !component.mirrored } : component
+      )
+    );
+    setStatusMsg("Mirrored selection.");
+  }, [pushEditorHistory, selectedIds, setActiveComponents]);
+
+  const openHelp = useCallback(() => {
+    setDemoOpen(false);
+    setHelpOpen(true);
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (isEditableTarget(event.target)) return;
+      const key = event.key.toLowerCase();
+      if (event.key === "Escape" && helpOpen) {
+        setHelpOpen(false);
+        event.preventDefault();
+        return;
+      }
+      if (event.key === "Escape" && pendingDevice) {
+        setPendingDevice(null);
+        setStatusMsg("Component placement canceled.");
+        event.preventDefault();
+        return;
+      }
+      if (!(event.ctrlKey || event.metaKey)) return;
+      if (key === "z") {
+        undoEditor();
+        event.preventDefault();
+      } else if (key === "r") {
+        rotateSelection();
+        event.preventDefault();
+      } else if (key === "e") {
+        mirrorSelection();
+        event.preventDefault();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [helpOpen, mirrorSelection, pendingDevice, rotateSelection, undoEditor]);
+
   /* -------------- Property update -------------- */
 
   const updateComponent = useCallback(
     (id: string, patch: Partial<CanvasComponent>) => {
+      pushEditorHistory();
       setLevels((cur) => {
         const activeBefore = cur.find((level) => level.id === activeLevelId);
         const oldEntityPins = activeBefore
@@ -437,7 +591,7 @@ export function App() {
         );
       });
     },
-    [activeLevelId]
+    [activeLevelId, pushEditorHistory]
   );
 
   /* -------------- Run simulation -------------- */
@@ -486,23 +640,25 @@ export function App() {
         }
         setResponsePreview(formatResponsePreview(body));
 
-        // Materialize a plot tile.
+        // Materialize a result tile.
         if (analysis.mode === "tran" && body.waveform) {
           const data = toPlotData(body.waveform, "time (s)", "V", analysis.probeNodes);
           addTile({
             title: `.tran — ${analysis.tStop}`,
             mode: "static",
+            view: "plot",
             data
           });
         } else if (analysis.mode === "ac" && body.spectrum) {
           const data = toSpectrumPlot(body.spectrum, { kind: "line", db: true, filterLabels: analysis.probeNodes });
-          addTile({ title: `.ac sweep`, mode: "static", data });
+          addTile({ title: `.ac sweep`, mode: "static", view: "plot", data });
         } else if (analysis.mode === "hb" && body.spectrum) {
           const f0 = Number(body?.metadata?.base_frequency_hz ?? 0);
           const data = toSpectrumPlot(body.spectrum, { kind: "stem", filterLabels: analysis.probeNodes });
           addTile({
             title: f0 > 0 ? `.hb spectrum · f0 ${formatCompact(f0)}Hz` : `.hb spectrum`,
             mode: "static",
+            view: "plot",
             data,
             w: 520,
             h: 300
@@ -512,15 +668,25 @@ export function App() {
           addTile({
             title: `.hb reconstruct — ${analysis.hbTimeWindow || "window"}`,
             mode: "static",
+            view: "plot",
             data,
             w: 520,
             h: 300
           });
         } else if (analysis.mode === "op" && body.dc_solution) {
           addTile({
-            title: `.op — DC solution`,
+            title: `.op — matrices and operating point`,
             mode: "static",
-            data: opResultPlotData(body.labels, body.dc_solution, analysis.probeNodes)
+            view: "op",
+            opData: {
+              labels: body.labels ?? [],
+              values: body.dc_solution ?? [],
+              matrices: body.matrices ?? {},
+              deviceOperatingPoints: body.metadata?.device_operating_points ?? [],
+              filterLabels: analysis.probeNodes
+            },
+            w: 760,
+            h: 520
           });
         }
       }
@@ -565,6 +731,7 @@ export function App() {
         w: 380,
         h: 240,
         mode: "dyn",
+        view: "plot",
         socket: ws,
         probe: target,
         windowSeconds: windowSim
@@ -660,6 +827,7 @@ export function App() {
       w: tileW,
       h: tileH,
       mode: "dyn",
+      view: "plot",
       socket: ws,
       windowSeconds: windowSim
     };
@@ -732,6 +900,7 @@ export function App() {
       y: 60 + offset,
       w: 420,
       h: 260,
+      view: "plot",
       ...partial
     };
     setTiles((cur) => [...cur, tile]);
@@ -777,6 +946,7 @@ export function App() {
   /* -------------- Presets / demos -------------- */
 
   function applyPreset(preset: SchematicPreset) {
+    pushEditorHistory();
     const rootLevel: SchematicLevel = {
       id: "root",
       title: preset.title,
@@ -821,6 +991,7 @@ export function App() {
   /* -------------- Hierarchy handlers -------------- */
 
   function addLevel(parentId: string | null) {
+    pushEditorHistory();
     const id = genId("level");
     const title = parentId === null ? `Level ${levels.length}` : `Subckt ${levels.filter((l) => l.parentId).length + 1}`;
     setLevels((cur) => [
@@ -830,9 +1001,11 @@ export function App() {
     setActiveLevelId(id);
   }
   function renameLevel(id: string, title: string) {
+    pushEditorHistory();
     updateLevel(id, { title });
   }
   function deleteLevel(id: string) {
+    pushEditorHistory();
     // Collect ``id`` plus every descendant via BFS so an entire subtree is
     // dropped in one operation. Without this, deleting a parent would orphan
     // its children, leaving stale entries in the hierarchy tree.
@@ -878,6 +1051,7 @@ export function App() {
 
   const onPaste = useCallback(() => {
     if (!clipboard || clipboard.components.length === 0) return;
+    pushEditorHistory();
     const idRemap = new Map<string, string>();
     const dx = 40;
     const dy = 40;
@@ -919,7 +1093,7 @@ export function App() {
     newComponents.forEach((c) => sel.add(c.id));
     newWires.forEach((w) => sel.add(w.id));
     setSelectedIds(sel);
-  }, [clipboard, setActiveComponents, setActiveWires]);
+  }, [clipboard, pushEditorHistory, setActiveComponents, setActiveWires]);
 
   /* -------------- Render -------------- */
 
@@ -970,7 +1144,7 @@ export function App() {
               </div>
             ) : null}
           </div>
-          <button className="menubar__item">Help</button>
+          <button className="menubar__item" onClick={openHelp}>Help</button>
         </div>
         <div className="menubar__spacer" />
         <div className="menubar__status">
@@ -987,8 +1161,48 @@ export function App() {
         onToggleProbe={() => setProbeMode((v) => !v)}
         probeMode={probeMode}
         onStartDisplay={startCaredNodeDisplay}
+        onOpenHelp={openHelp}
         running={running}
       />
+
+      {helpOpen ? (
+        <div className="modalBackdrop" onMouseDown={() => setHelpOpen(false)}>
+          <section
+            className="modal helpDialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="help-dialog-title"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="helpDialog__header">
+              <div>
+                <h2 id="help-dialog-title">MNA Simulation User Guide</h2>
+                <p>
+                  A practical map for drawing circuits, running analyses, reading results, and using the larger demos.
+                </p>
+              </div>
+              <button className="helpDialog__close" onClick={() => setHelpOpen(false)} aria-label="Close help">
+                ×
+              </button>
+            </div>
+            <div className="helpDialog__body">
+              {USER_GUIDE_SECTIONS.map((section) => (
+                <section key={section.title} className="helpSection">
+                  <h3>{section.title}</h3>
+                  <ul>
+                    {section.items.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                </section>
+              ))}
+            </div>
+            <div className="modalActions">
+              <button className="ghostBtn" onClick={() => setHelpOpen(false)}>Close</button>
+            </div>
+          </section>
+        </div>
+      ) : null}
 
       <LeftPane
         analysis={analysis}
@@ -1031,36 +1245,53 @@ export function App() {
           onSetWires={setActiveWires}
           onSelect={setSelectedIds}
           onPendingResolved={() => setPendingDevice(null)}
+          onBeforeEdit={pushEditorHistory}
           onProbePick={onProbePick}
           onCopy={onCopy}
           onPaste={onPaste}
         />
         <div className="tileLayer">
           {tiles.map((tile) => (
-            <PlotTile
-              key={tile.id}
-              id={tile.id}
-              title={tile.title}
-              x={tile.x}
-              y={tile.y}
-              w={tile.w}
-              h={tile.h}
-              mode={tile.mode}
-              data={tile.data}
-              windowSeconds={tile.windowSeconds}
-              onMount={
-                tile.mode === "dyn"
-                  ? (push, finalize) => {
-                      setTiles((cur) =>
-                        cur.map((t) => (t.id === tile.id ? { ...t, push, finalize } : t))
-                      );
-                    }
-                  : undefined
-              }
-              onMove={moveTile}
-              onResize={resizeTile}
-              onClose={closeTile}
-            />
+            tile.view === "op" && tile.opData ? (
+              <ResultTile
+                key={tile.id}
+                id={tile.id}
+                title={tile.title}
+                x={tile.x}
+                y={tile.y}
+                w={tile.w}
+                h={tile.h}
+                opData={tile.opData}
+                onMove={moveTile}
+                onResize={resizeTile}
+                onClose={closeTile}
+              />
+            ) : (
+              <PlotTile
+                key={tile.id}
+                id={tile.id}
+                title={tile.title}
+                x={tile.x}
+                y={tile.y}
+                w={tile.w}
+                h={tile.h}
+                mode={tile.mode}
+                data={tile.data}
+                windowSeconds={tile.windowSeconds}
+                onMount={
+                  tile.mode === "dyn"
+                    ? (push, finalize) => {
+                        setTiles((cur) =>
+                          cur.map((t) => (t.id === tile.id ? { ...t, push, finalize } : t))
+                        );
+                      }
+                    : undefined
+                }
+                onMove={moveTile}
+                onResize={resizeTile}
+                onClose={closeTile}
+              />
+            )
           ))}
         </div>
       </div>
@@ -1073,7 +1304,7 @@ export function App() {
         </span>
         <span style={{ flex: 1 }} />
         <span className="statusbar__slot">
-          Shift+click: multi-select · drag: marquee · Ctrl+C/V: copy/paste · R: rotate · Del: delete
+          Shift+click: multi-select · drag: marquee · Ctrl+C/V: copy/paste · Ctrl+R: rotate · Ctrl+E: mirror · Ctrl+Z: rollback · Del: delete
         </span>
       </div>
     </div>

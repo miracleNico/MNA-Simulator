@@ -20,6 +20,7 @@ from mna_simulation.core_basic import build_and_run_basic
 from mna_simulation.errors import NetlistError
 from mna_simulation.mna_builder import build_mna_problem
 from mna_simulation.netlist import parse_netlist_text
+from mna_simulation.solvers import _level1_bjt_currents_and_derivatives
 
 
 # ---------------------------------------------------------------------------
@@ -310,6 +311,93 @@ def test_hybrid_pi_small_signal_amp_runs_without_singular_g() -> None:
     assert coll.max() - coll.min() > 0.2
 
 
+def test_plus_15v_ce_demo_bias_has_midrail_collector_and_gain() -> None:
+    circuit = parse_netlist_text(
+        """
+        VCC vcc 0 DC 15
+        Vin vin 0 SIN 0.02 1k
+        Cin vin base 1u
+        RbTop vcc base 220k
+        RbBot base 0 15k
+        Rc vcc collector 12k
+        Re emitter 0 330
+        Q1 collector base emitter QNPN LEVEL1 1e-15 150 3 100 25 4p 2p 50 0.5 5
+        Cout collector out 4.7u
+        Rload out 0 10k
+        .tran 10m 5u
+        .end
+        """
+    )
+    options = AnalysisOptions(mode=AnalysisMode.TRAN, tran_stop=10e-3, tran_step=5e-6)
+    result = build_and_run_basic(circuit, options)
+    assert result.waveform is not None
+    labels = result.waveform.labels
+    values = np.asarray(result.waveform.values)
+    settled = result.waveform.time > 4e-3
+    vin = values[labels.index("V(vin)"), :]
+    out = values[labels.index("V(out)"), :]
+    collector = values[labels.index("V(collector)"), :]
+
+    gain = (out[settled].max() - out[settled].min()) / (vin[settled].max() - vin[settled].min())
+    assert 13.0 < gain < 16.0
+    assert 7.0 < collector[0] < 8.3
+    assert result.metadata["device_operating_points"][0]["region"] == "forward_active"
+
+
+def test_ac_coupled_three_stage_bjt_demo_biases_each_stage_and_amplifies() -> None:
+    netlist_text = """
+        VCC vcc 0 DC 15
+        Vin vin 0 SIN 0.001 1k
+        Cin vin inp 1u
+        Cref inn 0 1u
+        RbpT vcc inp 150k
+        RbpB inp 0 20k
+        RbnT vcc inn 150k
+        RbnB inn 0 20k
+        Qd1 c1 inp etail QNPN LEVEL1 1e-15 150 3 100 25 4p 2p 50 0.5 5
+        Qd2 dout inn etail QNPN LEVEL1 1e-15 150 3 100 25 4p 2p 50 0.5 5
+        Rc1 vcc c1 5.6k
+        Rc2 vcc dout 5.6k
+        Rtail etail 0 2.2k
+        Cd dout midin 1u
+        RmT vcc midin 150k
+        RmB midin 0 20k
+        Qm mout midin me QNPN LEVEL1 1e-15 150 3 100 25 4p 2p 50 0.5 5
+        Rcm vcc mout 12k
+        Rem me 0 1.5k
+        Cmo mout fbase 1u
+        RfT vcc fbase 68k
+        RfB fbase 0 75k
+        Qo vcc fbase out QNPN LEVEL1 1e-15 150 3 100 25 4p 2p 50 0.5 5
+        Reo out 0 1.2k
+        Rload out 0 10k
+        .tran 10m 5u
+        .end
+        """
+    circuit = parse_netlist_text(netlist_text)
+    options = AnalysisOptions(mode=AnalysisMode.TRAN, tran_stop=10e-3, tran_step=5e-6)
+    result = build_and_run_basic(circuit, options)
+    assert result.waveform is not None
+    labels = result.waveform.labels
+    values = np.asarray(result.waveform.values)
+    settled = result.waveform.time > 4e-3
+    vin = values[labels.index("V(vin)"), settled]
+    out = values[labels.index("V(out)"), settled]
+    gain = (out.max() - out.min()) / (vin.max() - vin.min())
+    assert 95.0 < gain < 110.0
+
+    op_result = build_and_run_basic(
+        parse_netlist_text(netlist_text.replace(".tran 10m 5u", ".op")),
+        AnalysisOptions(mode=AnalysisMode.OP),
+    )
+    op = dict(zip(op_result.labels, np.asarray(op_result.dc_solution).flatten()))
+    assert 13.0 < op["V(dout)"] < 14.0
+    assert 6.6 < op["V(mout)"] < 7.6
+    assert 5.5 < op["V(out)"] < 7.0
+    regions = [point["region"] for point in op_result.metadata["device_operating_points"]]
+    assert regions == ["forward_active", "forward_active", "forward_active", "forward_active"]
+
+
 def test_qnpn_small_signal_device_matches_hybrid_pi_shape() -> None:
     """A QNPN line is stamped as a backend-owned hybrid-pi device.
 
@@ -372,6 +460,64 @@ def test_qnpn_extended_small_signal_model_stamps_ro_and_caps() -> None:
     assert problem.C[b, e] < 0.0
     assert problem.C[b, c] < 0.0
     assert problem.C[c, e] < 0.0
+
+
+def test_level1_bjt_parser_registers_nonlinear_device_and_junction_caps() -> None:
+    circuit = parse_netlist_text(
+        """
+        Q1 collector base emitter QNPN LEVEL1 1e-15 150 3 100 25 4p 2p 50 0.5 5
+        .op
+        .end
+        """
+    )
+
+    component = circuit.components[0]
+    assert component.metadata["model"] == "level1"
+    assert component.value == "1e-15"
+    assert component.value2 == "150"
+    assert component.metadata["cje"] == "4p"
+
+    problem = build_mna_problem(circuit)
+    labels = problem.metadata["labels"]
+    assert len(problem.level1_bjt_devices) == 1
+    base = labels.index("V(base)")
+    emitter = labels.index("V(emitter)")
+    collector = labels.index("V(collector)")
+    assert problem.C[base, emitter] < 0.0
+    assert problem.C[base, collector] < 0.0
+
+
+def test_level1_bjt_currents_cover_forward_active_cutoff_and_pnp_polarity() -> None:
+    params = {"is": 1e-15, "bf": 150, "br": 3, "vaf": 100, "var": 25}
+
+    npn_currents, npn_derivatives = _level1_bjt_currents_and_derivatives(
+        {"type": "QNPN", **params},
+        vc=5.0,
+        vb=0.72,
+        ve=0.0,
+    )
+    assert npn_currents[0] > 0.0
+    assert npn_currents[1] > 0.0
+    assert npn_currents[2] < 0.0
+    assert npn_derivatives[0][1] > 0.0
+
+    cutoff_currents, _ = _level1_bjt_currents_and_derivatives(
+        {"type": "QNPN", **params},
+        vc=5.0,
+        vb=0.0,
+        ve=0.0,
+    )
+    assert max(abs(float(current)) for current in cutoff_currents) < 1e-12
+
+    pnp_currents, _ = _level1_bjt_currents_and_derivatives(
+        {"type": "QPNP", **params},
+        vc=0.0,
+        vb=4.28,
+        ve=5.0,
+    )
+    assert pnp_currents[0] < 0.0
+    assert pnp_currents[1] < 0.0
+    assert pnp_currents[2] > 0.0
 
 
 def test_mos_small_signal_model_is_backend_owned_with_caps() -> None:

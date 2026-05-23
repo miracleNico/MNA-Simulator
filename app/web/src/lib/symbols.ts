@@ -396,6 +396,9 @@ export function drawComponent(
   if (component.rotation) {
     ctx.rotate((component.rotation * Math.PI) / 180);
   }
+  if (component.mirrored) {
+    ctx.scale(-1, 1);
+  }
   switch (component.type) {
     case "R":
       drawResistor(ctx, theme);

@@ -262,6 +262,18 @@ def _build_component_line(
         collector = nodes.get("c", "")
         base = nodes.get("b", "")
         emitter = nodes.get("e", "")
+        if component.metadata.get("model") == "level1":
+            is_ = component.value or "1e-15"
+            bf = component.value2 or "150"
+            br = component.value3 or "3"
+            vaf = component.metadata.get("vaf", "100")
+            var = component.metadata.get("var", "25")
+            cje = component.metadata.get("cje", "4p")
+            cjc = component.metadata.get("cjc", "2p")
+            rb = component.metadata.get("rb", "50")
+            re = component.metadata.get("re", "0.5")
+            rc = component.metadata.get("rc", "5")
+            return f"{name} {collector} {base} {emitter} {component.type} LEVEL1 {is_} {bf} {br} {vaf} {var} {cje} {cjc} {rb} {re} {rc}"
         gm = component.value or "40m"
         r_pi = component.value2 or "2.5k"
         r_o = component.value3 or "100k"

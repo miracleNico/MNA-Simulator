@@ -8,7 +8,7 @@ The project includes:
 - FastAPI service for schematic and netlist simulation.
 - React + TypeScript schematic editor.
 - Backend-owned schematic-to-netlist pipeline with hierarchy validation.
-- Small-signal BJT/MOSFET models, plus nonlinear Level-1 MOSFET transient support.
+- Physical Level-1 BJT/MOSFET defaults, plus opt-in small-signal compatibility models.
 - Sparse Krylov-capable solver path for large linear transient circuits.
 
 ## Highlights
@@ -16,14 +16,16 @@ The project includes:
 - **Single validation path:** schematic JSON is flattened to canonical netlist text, then parsed by the same parser used for raw netlists.
 - **Hierarchy-aware schematics:** `SUBCKT` instances connect to child ports through editable `NODE` markers. A child node named `in` exports as `port_in` and flattens as logical instance names such as `DiffAmp.in`.
 - **Scoped child ports:** each child entity owns its own port names. Renaming ports in one child syncs only instances of that entity and repairs connected wire endpoints.
-- **Non-ideal transistor defaults:** `QNPN`, `QPNP`, `NMOS`, and `PMOS` use regular small-signal parameters by default, while extra parasitic-only parameters can still be set to zero.
+- **SPICE-style transistor flow:** `QNPN`, `QPNP`, `NMOS`, and `PMOS` default to physical Level-1 nonlinear models. `.op` solves bias, `.ac` linearizes around that bias, and `.tran` keeps solving nonlinear I-V equations.
 - **Harmonic balance workflow:** `.hb <harmonics> [time_window]` supports harmonic-domain results and optional reconstructed time-domain waveforms.
+- **Close-tone HB demo:** Frequency Domain Demos includes a nonlinear diode mixer driven by 1 GHz and 1.005 GHz tones, showing the 5 MHz beat/difference product in a high-Q envelope tank that would need 40+ beat periods of picosecond-step transient settling.
 - **Krylov controls:** API/UI requests can use automatic method selection or explicitly choose Arnoldi/GMRES, MINRES/CR, or Conjugate Gradient. Auto Krylov rank resolves after MNA assembly as `ceil(0.5 * matrix_dimension)`.
 - **Sparse large-circuit path:** linear transient Krylov runs can use cached SciPy CSR Backward-Euler operators instead of dense conversion on every step.
-- **Functional MOS SRAM demo:** the Large Scale Circuits menu includes a 10x10 Level-1 MOS 6T SRAM demo with FUNC-driven write/hold/read timing.
+- **Functional MOS SRAM demo:** the Large Scale Circuits menu includes a hierarchical 10x10 Level-1 MOS 6T SRAM demo with FUNC-driven write/hold/read timing; the root canvas shows cell instances while the reusable child level holds the transistor cell body.
 - **Large RLC benchmark demo:** the 23x23 distributed RLC mesh produces a 1035-unknown sparse MNA system for Krylov/MINRES benchmarking.
 - **Editable netlist mode:** the web app can switch from schematic mode to raw netlist editing after a confirmation that clears the schematic hierarchy.
 - **Interactive visualization:** `.op`, `.tran`, `.ac`, `.hb`, and `.dyn` results render in movable plot tiles, with selectable display nodes.
+- **In-app user guide:** toolbar Help opens a detailed guide for demos, schematic editing, hierarchy, analysis modes, visualization, Krylov controls, and raw netlist mode.
 
 ## Repository Layout
 
@@ -33,6 +35,7 @@ The project includes:
 - `tests/`: parser, builder, service, harmonic-balance, transistor, and hierarchy regression tests.
 - `benchmarks/`: lightweight benchmark entry points.
 - `legacy/`: older simulator snapshots kept for comparison.
+- `USER_GUIDE.md`: user-facing web-app guide mirrored by the in-app Help dialog.
 - `STRUCT.md`: file-by-file architecture reference.
 
 ## Quick Start
@@ -99,8 +102,9 @@ Schematic runs return the generated canonical netlist in response metadata. Simu
 - Sources: `V`, `I` with `DC`, `AC`, `SIN`, `COS`, `STEP`, and `FUNC`.
 - Nonlinear/behavioral: `D`, behavioral source path.
 - Controlled sources: `VCVS`, `VCCS`, `CCCS`, `CCVS`.
-- Transistors: `QNPN`, `QPNP`, `NMOS`, `PMOS` small-signal models.
-- Physical MOS mode: `M1 d g s NMOS LEVEL1 beta vth lambda cgs cgd` and PMOS equivalent for nonlinear transient runs.
+- Transistors: `QNPN`, `QPNP`, `NMOS`, and `PMOS` default to physical Level-1 models, with small-signal compatibility still available.
+- Physical BJT syntax: `Q1 c b e QNPN LEVEL1 is bf br vaf var cje cjc rb re rc` and PNP equivalent.
+- Physical MOS syntax: `M1 d g s NMOS LEVEL1 beta vth lambda cgs cgd` and PMOS equivalent.
 - Schematic-only frontend helpers: `SUBCKT`, `NODE`, `LABEL`, `GND`.
 
 ## Supported Analysis Modes
@@ -120,7 +124,8 @@ The frontend supports:
 - Multi-level hierarchy with editable `SUBCKT` pin names.
 - Editable `NODE` markers that connect by matching name within the same level.
 - Editable child ports: a `NODE` named `in` in a child entity exports as `port_in`.
-- Top-menu demos, including a BJT 3-stage amplifier built from real subcircuits and Large Scale Circuits presets.
+- Top-menu demos, including a BJT 3-stage amplifier built from real subcircuits, a GHz close-tone HB mixer, and Large Scale Circuits presets.
+- Toolbar Help opens the same practical guide stored in `USER_GUIDE.md`.
 - Raw netlist editing in the Visualization panel. Starting an edit asks for confirmation and then clears schematic hierarchy so the request is sent as `netlist_text`.
 - Krylov controls with method override, auto/manual rank, and method-specific wording for restart versus iteration budget.
 - `.op`, `.tran`, `.ac`, `.hb`, and dynamic display/probe visualization.

@@ -41,6 +41,7 @@ type Props = {
   onSetWires: (updater: (current: CanvasWire[]) => CanvasWire[]) => void;
   onSelect: (ids: Set<string>) => void;
   onPendingResolved: () => void;
+  onBeforeEdit: () => void;
   onProbePick: (target: ProbeTarget) => void;
   onCopy: (data: ClipboardData) => void;
   onPaste: () => void;
@@ -71,6 +72,7 @@ export function SchematicCanvas(props: Props) {
   const [hoverPin, setHoverPin] = useState<{ componentId: string; pin: string } | null>(null);
   const [hoverFreePoint, setHoverFreePoint] = useState<{ wireId: string; end: "start" | "end"; x: number; y: number } | null>(null);
   const [mousePos, setMousePos] = useState<{ x: number; y: number; wx: number; wy: number } | null>(null);
+  const moveHistorySavedRef = useRef(false);
 
   const componentsById = useMemo(() => {
     const map = new Map<string, CanvasComponent>();
@@ -200,6 +202,7 @@ export function SchematicCanvas(props: Props) {
       const nextIndex =
         props.components.filter((c) => c.type === props.pendingDevice).length + 1;
       const nc = createDefaultComponent(props.pendingDevice, nextIndex, wx, wy);
+      props.onBeforeEdit();
       props.onSetComponents((cur) => [...cur, nc]);
       props.onPendingResolved();
       return;
@@ -315,6 +318,7 @@ export function SchematicCanvas(props: Props) {
       nextSel = new Set([hit.id]);
     }
     props.onSelect(nextSel);
+    moveHistorySavedRef.current = false;
     // Build origin map for selected components so we can drag the group.
     const origin = new Map<string, { x: number; y: number }>();
     for (const id of nextSel) {
@@ -347,6 +351,10 @@ export function SchematicCanvas(props: Props) {
     if (interaction.kind === "moving") {
       const dx = wx - interaction.anchorWX;
       const dy = wy - interaction.anchorWY;
+      if (!moveHistorySavedRef.current && Math.hypot(dx, dy) > 1) {
+        props.onBeforeEdit();
+        moveHistorySavedRef.current = true;
+      }
       const origin = interaction.origin;
       props.onSetComponents((cur) =>
         cur.map((c) => {
@@ -407,9 +415,10 @@ export function SchematicCanvas(props: Props) {
       start: from,
       end: to
     };
+    const existing = new Set(props.wires.map(wireKey));
+    if (existing.has(wireKey(candidate))) return;
+    props.onBeforeEdit();
     props.onSetWires((cur) => {
-      const existing = new Set(cur.map(wireKey));
-      if (existing.has(wireKey(candidate))) return cur;
       return [...cur, candidate];
     });
   }
@@ -430,6 +439,7 @@ export function SchematicCanvas(props: Props) {
   function deleteSelection(): void {
     if (props.selectedIds.size === 0) return;
     const sel = props.selectedIds;
+    props.onBeforeEdit();
     props.onSetComponents((cur) => cur.filter((c) => !sel.has(c.id)));
     props.onSetWires((cur) =>
       cur.filter((w) => {
@@ -482,13 +492,19 @@ export function SchematicCanvas(props: Props) {
         e.preventDefault();
       }
     } else if (e.key === "Escape") {
+      if (props.pendingDevice) {
+        props.onPendingResolved();
+      }
       if (interaction.kind === "wiring" || interaction.kind === "marquee") {
         setInteraction({ kind: "idle" });
       }
       props.onSelect(new Set());
-    } else if (e.key.toLowerCase() === "r") {
+      e.preventDefault();
+      e.stopPropagation();
+    } else if (!(e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "r") {
       // Rotate every selected component 90° clockwise.
       if (props.selectedIds.size > 0) {
+        props.onBeforeEdit();
         props.onSetComponents((cur) =>
           cur.map((c) =>
             props.selectedIds.has(c.id)
@@ -736,6 +752,7 @@ export function SchematicCanvas(props: Props) {
           x: snap(mousePos.wx),
           y: snap(mousePos.wy),
           rotation: 0,
+          mirrored: false,
           pins: props.pendingDevice === "SUBCKT" ? ["a", "b", "c", "d"] : undefined
         },
         DEFAULT_THEME
@@ -787,6 +804,11 @@ export function SchematicCanvas(props: Props) {
       {interaction.kind === "wiring" ? (
         <div className="nodeProbeHint" style={{ right: 16, top: 16 }}>
           Wiring — click a pin to finish, click empty space to drop a free joint, Esc to cancel
+        </div>
+      ) : null}
+      {props.pendingDevice ? (
+        <div className="nodeProbeHint" style={{ right: 16, top: interaction.kind === "wiring" ? 54 : 16 }}>
+          Placing {props.pendingDevice} — click to place, Esc to cancel
         </div>
       ) : null}
     </div>

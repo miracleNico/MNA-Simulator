@@ -106,6 +106,7 @@ class MnaProblem:
     index_map: IndexMap
     components: list[ComponentRecord]
     level1_mos_devices: list[dict[str, Any]] = field(default_factory=list)
+    level1_bjt_devices: list[dict[str, Any]] = field(default_factory=list)
     gmin: float = 0.0
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -126,6 +127,7 @@ class SpectrumResult:
     frequencies: np.ndarray
     magnitudes: np.ndarray
     labels: list[str]
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -232,13 +234,34 @@ class SchematicComponent(BaseModel):
             "V": "1",
             "I": "1m",
             "D": "1e-15",
-            "QNPN": "40m",
-            "QPNP": "40m",
-            "NMOS": "5m",
-            "PMOS": "5m",
+            "QNPN": "1e-15",
+            "QPNP": "1e-15",
+            "NMOS": "1m",
+            "PMOS": "1m",
         }
         if self.type in defaults and (self.value is None or str(self.value).strip() == ""):
             self.value = defaults[self.type]
+        if self.type in {"QNPN", "QPNP"}:
+            model = self.metadata.get("model", "level1")
+            self.metadata["model"] = model
+            if model == "level1":
+                self.value2 = self.value2 or "150"
+                self.value3 = self.value3 or "3"
+                self.metadata.setdefault("vaf", "100")
+                self.metadata.setdefault("var", "25")
+                self.metadata.setdefault("cje", "4p")
+                self.metadata.setdefault("cjc", "2p")
+                self.metadata.setdefault("rb", "50")
+                self.metadata.setdefault("re", "0.5")
+                self.metadata.setdefault("rc", "5")
+        if self.type in {"NMOS", "PMOS"}:
+            model = self.metadata.get("model", "level1")
+            self.metadata["model"] = model
+            if model == "level1":
+                self.value2 = self.value2 or "0.7"
+                self.value3 = self.value3 or "0.02"
+                self.metadata.setdefault("cgs", "2p")
+                self.metadata.setdefault("cgd", "1p")
         if self.type in {"V", "I"}:
             self.subtype = (self.subtype or "DC").upper()
         else:

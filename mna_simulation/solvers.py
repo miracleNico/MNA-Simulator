@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import time
+from collections.abc import Callable
 
 import numpy as np
 import sympy as sp
@@ -790,14 +791,133 @@ def _evaluate_level1_mos_devices(
     return f, jacobian
 
 
+def _bjt_level1_npn_currents_and_derivatives(
+    vc: float,
+    vb: float,
+    ve: float,
+    is_: float,
+    bf: float,
+    br: float,
+    vaf: float,
+    var: float,
+) -> tuple[tuple[float, float, float], tuple[tuple[float, float, float], ...]]:
+    """Return NPN terminal currents and dI/d(Vc,Vb,Ve).
+
+    Currents are positive when leaving the external terminal into the compact
+    device. This Ebers-Moll-lite model is intentionally small: transport
+    currents, finite forward/reverse beta, and simple Early modulation.
+    """
+
+    vt = 0.02585
+    alpha_f = bf / (bf + 1.0) if bf > 0.0 else 0.0
+    alpha_r = br / (br + 1.0) if br > 0.0 else 0.0
+    vbe = vb - ve
+    vbc = vb - vc
+    vce = vc - ve
+    vec = ve - vc
+
+    exp_be = np.exp(np.clip(vbe / vt, -80.0, 80.0))
+    exp_bc = np.exp(np.clip(vbc / vt, -80.0, 80.0))
+    ibe = is_ * (exp_be - 1.0)
+    ibc = is_ * (exp_bc - 1.0)
+    gbe = is_ * exp_be / vt
+    gbc = is_ * exp_bc / vt
+
+    fwd_mod = 1.0 + vce / vaf if vaf > 0.0 else 1.0
+    rev_mod = 1.0 + vec / var if var > 0.0 else 1.0
+    df_dvc = 1.0 / vaf if vaf > 0.0 else 0.0
+    df_dve = -df_dvc
+    dr_dvc = -1.0 / var if var > 0.0 else 0.0
+    dr_dve = -dr_dvc
+
+    ic = alpha_f * ibe * fwd_mod - ibc * rev_mod
+    ib = (1.0 - alpha_f) * ibe + (1.0 - alpha_r) * ibc * rev_mod
+    ie = -(ic + ib)
+
+    dic_dvc = alpha_f * ibe * df_dvc + gbc * rev_mod - ibc * dr_dvc
+    dic_dvb = alpha_f * gbe * fwd_mod - gbc * rev_mod
+    dic_dve = alpha_f * (-gbe * fwd_mod + ibe * df_dve) - ibc * dr_dve
+
+    dib_dvc = (1.0 - alpha_r) * (-gbc * rev_mod + ibc * dr_dvc)
+    dib_dvb = (1.0 - alpha_f) * gbe + (1.0 - alpha_r) * gbc * rev_mod
+    dib_dve = -(1.0 - alpha_f) * gbe + (1.0 - alpha_r) * ibc * dr_dve
+
+    die_dvc = -(dic_dvc + dib_dvc)
+    die_dvb = -(dic_dvb + dib_dvb)
+    die_dve = -(dic_dve + dib_dve)
+
+    currents = (ic, ib, ie)
+    derivatives = (
+        (dic_dvc, dic_dvb, dic_dve),
+        (dib_dvc, dib_dvb, dib_dve),
+        (die_dvc, die_dvb, die_dve),
+    )
+    return currents, derivatives
+
+
+def _level1_bjt_currents_and_derivatives(
+    device: dict[str, object],
+    vc: float,
+    vb: float,
+    ve: float,
+) -> tuple[tuple[float, float, float], tuple[tuple[float, float, float], ...]]:
+    is_ = float(device["is"])
+    bf = float(device["bf"])
+    br = float(device["br"])
+    vaf = float(device["vaf"])
+    var = float(device["var"])
+    if str(device["type"]).upper() == "QPNP":
+        currents, derivatives = _bjt_level1_npn_currents_and_derivatives(-vc, -vb, -ve, is_, bf, br, vaf, var)
+        return tuple(-current for current in currents), derivatives
+    return _bjt_level1_npn_currents_and_derivatives(vc, vb, ve, is_, bf, br, vaf, var)
+
+
+def _evaluate_level1_bjt_devices(
+    devices: list[dict[str, object]],
+    size: int,
+    x_values: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    f = np.zeros((size, 1), dtype=float)
+    jacobian = np.zeros((size, size), dtype=float)
+
+    def voltage(index: int) -> float:
+        return 0.0 if index == -1 else float(x_values[index])
+
+    def add_row(row: int, current: float, terminals: tuple[int, int, int], derivatives: tuple[float, float, float]) -> None:
+        if row == -1:
+            return
+        f[row, 0] += current
+        for col, derivative in zip(terminals, derivatives):
+            if col != -1 and derivative != 0.0:
+                jacobian[row, col] += derivative
+
+    for device in devices:
+        collector = int(device["collector"])
+        base = int(device["base"])
+        emitter = int(device["emitter"])
+        currents, derivatives = _level1_bjt_currents_and_derivatives(
+            device,
+            voltage(collector),
+            voltage(base),
+            voltage(emitter),
+        )
+        terminals = (collector, base, emitter)
+        for row, current, row_derivatives in zip(terminals, currents, derivatives):
+            add_row(row, current, terminals, row_derivatives)
+
+    return f, jacobian
+
+
 def compile_nl_functions(
     f_str_vector: np.ndarray,
     size: int,
     level1_mos_devices: list[dict[str, object]] | None = None,
+    level1_bjt_devices: list[dict[str, object]] | None = None,
 ):
     """Compile nonlinear current expressions and their Jacobian."""
 
-    devices = list(level1_mos_devices or [])
+    mos_devices = list(level1_mos_devices or [])
+    bjt_devices = list(level1_bjt_devices or [])
     has_symbolic = any(expr != "0" for expr in f_str_vector.flatten())
     symbolic_f_func = None
     symbolic_j_func = None
@@ -822,8 +942,11 @@ def compile_nl_functions(
             f = np.zeros((size, 1), dtype=float)
         else:
             f = np.asarray(symbolic_f_func(*args), dtype=float).reshape(size, 1)
-        if devices:
-            f += _evaluate_level1_mos_devices(devices, size, np.asarray(args, dtype=float))[0]
+        x_values = np.asarray(args, dtype=float)
+        if mos_devices:
+            f += _evaluate_level1_mos_devices(mos_devices, size, x_values)[0]
+        if bjt_devices:
+            f += _evaluate_level1_bjt_devices(bjt_devices, size, x_values)[0]
         return f
 
     def j_func(*args):
@@ -831,8 +954,11 @@ def compile_nl_functions(
             jacobian = np.zeros((size, size), dtype=float)
         else:
             jacobian = np.asarray(symbolic_j_func(*args), dtype=float).reshape(size, size)
-        if devices:
-            jacobian += _evaluate_level1_mos_devices(devices, size, np.asarray(args, dtype=float))[1]
+        x_values = np.asarray(args, dtype=float)
+        if mos_devices:
+            jacobian += _evaluate_level1_mos_devices(mos_devices, size, x_values)[1]
+        if bjt_devices:
+            jacobian += _evaluate_level1_bjt_devices(bjt_devices, size, x_values)[1]
         return jacobian
 
     return f_func, j_func
@@ -887,6 +1013,44 @@ def _transient_time_points(t_stop: float, t_step: float) -> np.ndarray:
     return np.asarray(points, dtype=float)
 
 
+def _finite_vector_norm(vector: np.ndarray) -> float:
+    if not np.all(np.isfinite(vector)):
+        return np.inf
+    return float(np.linalg.norm(vector))
+
+
+def _damped_newton_step(
+    x: np.ndarray,
+    delta_x: np.ndarray,
+    current_norm: float,
+    residual_at: Callable[[np.ndarray], np.ndarray],
+    max_trials: int = 28,
+) -> tuple[np.ndarray, float, float]:
+    """Pick a finite damped Newton step without committing the full step first."""
+
+    best_x = x
+    best_norm = current_norm
+    best_scale = 0.0
+    scale = 1.0
+    for _ in range(max_trials):
+        trial = x + delta_x * scale
+        try:
+            trial_norm = _finite_vector_norm(residual_at(trial))
+        except (FloatingPointError, OverflowError, ValueError):
+            trial_norm = np.inf
+        if np.isfinite(trial_norm) and trial_norm < best_norm:
+            best_x = trial
+            best_norm = trial_norm
+            best_scale = scale
+        if np.isfinite(trial_norm) and trial_norm <= current_norm:
+            return trial, trial_norm, scale
+        scale *= 0.5
+
+    if best_scale > 0.0:
+        return best_x, best_norm, best_scale
+    return x, current_norm, 0.0
+
+
 def solve_dc_nr(
     G: np.ndarray,
     f_str_vector: np.ndarray,
@@ -903,11 +1067,12 @@ def solve_dc_nr(
     krylov_method: str = "auto",
     krylov_stats: list[dict[str, object]] | None = None,
     level1_mos_devices: list[dict[str, object]] | None = None,
+    level1_bjt_devices: list[dict[str, object]] | None = None,
 ) -> np.ndarray:
     """Solve the DC operating point using linear solve or Newton-Raphson."""
 
     size = G.shape[0]
-    if not is_nonlinear(f_str_vector) and not level1_mos_devices:
+    if not is_nonlinear(f_str_vector) and not level1_mos_devices and not level1_bjt_devices:
         try:
             return solve_linear(
                 G,
@@ -924,7 +1089,12 @@ def solve_dc_nr(
             error_handler(f"NR_CONVERGENCE: Linear system is singular (G matrix): {exc}")
             raise
 
-    f_func, Jf_func = compile_nl_functions(f_str_vector, size, level1_mos_devices=level1_mos_devices)
+    f_func, Jf_func = compile_nl_functions(
+        f_str_vector,
+        size,
+        level1_mos_devices=level1_mos_devices,
+        level1_bjt_devices=level1_bjt_devices,
+    )
     if isinstance(init_cond, str):
         if init_cond == "DEFAULT":
             x = np.zeros((size, 1))
@@ -935,14 +1105,12 @@ def solve_dc_nr(
     else:
         x = init_cond.copy()
 
-    norm_F_now = np.inf
     for iteration in range(max_iter):
         x_flat = x.flatten()
         f_k = np.asarray(f_func(*x_flat), dtype=float).reshape(size, 1)
         F_k = (G @ x) + f_k - b
 
-        norm_F_prev = norm_F_now
-        norm_F_now = np.linalg.norm(F_k)
+        norm_F_now = _finite_vector_norm(F_k)
         if norm_F_now < f_tol:
             return x
 
@@ -965,21 +1133,20 @@ def solve_dc_nr(
             error_handler(f"JACOBIAN_SINGULAR: Jacobian is singular at iteration {iteration}.")
             raise exc
 
-        x = x + delta_x
-        if np.linalg.norm(delta_x) < v_tol:
-            return x
+        def residual_at(trial: np.ndarray) -> np.ndarray:
+            trial_flat = trial.flatten()
+            f_trial = np.asarray(f_func(*trial_flat), dtype=float).reshape(size, 1)
+            return (G @ trial) + f_trial - b
 
-        if norm_F_now > norm_F_prev:
-            attenuation = 0.5
-            for _ in range(20):
-                trial = x - delta_x + delta_x * attenuation
-                trial_flat = trial.flatten()
-                f_trial = np.asarray(f_func(*trial_flat), dtype=float).reshape(size, 1)
-                F_trial = (G @ trial) + f_trial - b
-                if np.linalg.norm(F_trial) <= norm_F_prev:
-                    x = trial
-                    break
-                attenuation *= 0.5
+        x_next, next_norm, step_scale = _damped_newton_step(x, delta_x, norm_F_now, residual_at)
+        accepted_delta = x_next - x
+        x = x_next
+        if next_norm < f_tol:
+            return x
+        if step_scale == 0.0:
+            error_handler(f"NR_CONVERGENCE: Newton step could not reduce residual at iteration {iteration}.")
+        if np.linalg.norm(accepted_delta) < v_tol:
+            return x
 
     error_handler(f"NR_CONVERGENCE: Solver did not converge after {max_iter} iterations.")
 
@@ -1005,9 +1172,15 @@ def solve_transient(
     size = problem.G.shape[0]
     solver_f_str = problem.solver_f_str if problem.solver_f_str is not None else problem.f_str
     level1_devices = problem.level1_mos_devices
-    has_nonlinear_terms = is_nonlinear(solver_f_str) or bool(level1_devices)
+    level1_bjt_devices = problem.level1_bjt_devices
+    has_nonlinear_terms = is_nonlinear(solver_f_str) or bool(level1_devices) or bool(level1_bjt_devices)
     if has_nonlinear_terms:
-        f_func, Jf_func = compile_nl_functions(solver_f_str, size, level1_mos_devices=level1_devices)
+        f_func, Jf_func = compile_nl_functions(
+            solver_f_str,
+            size,
+            level1_mos_devices=level1_devices,
+            level1_bjt_devices=level1_bjt_devices,
+        )
     else:
         f_func = lambda *args: np.zeros((size, 1))  # noqa: E731
         Jf_func = lambda *args: np.zeros((size, size))  # noqa: E731
@@ -1031,6 +1204,7 @@ def solve_transient(
             krylov_method=krylov_method,
             krylov_stats=krylov_stats,
             level1_mos_devices=level1_devices,
+            level1_bjt_devices=level1_bjt_devices,
         )
     else:
         x_prev = init_cond.copy()
@@ -1103,7 +1277,8 @@ def solve_transient(
             f_k = np.asarray(f_func(*x_flat), dtype=float).reshape(size, 1)
             F_k = (G_be @ x_k) + f_k - b_be
 
-            if np.linalg.norm(F_k) < f_tol:
+            norm_F = _finite_vector_norm(F_k)
+            if norm_F < f_tol:
                 converged = True
                 break
 
@@ -1126,8 +1301,20 @@ def solve_transient(
                 error_handler(f"JACOBIAN_SINGULAR: Jacobian singular at t={t_points[step]:.2e}, iter={iteration}")
                 raise exc
 
-            x_k = x_k + delta_x
-            if np.linalg.norm(delta_x) < v_tol:
+            def residual_at(trial: np.ndarray) -> np.ndarray:
+                trial_flat = trial.flatten()
+                f_trial = np.asarray(f_func(*trial_flat), dtype=float).reshape(size, 1)
+                return (G_be @ trial) + f_trial - b_be
+
+            x_next, next_norm, step_scale = _damped_newton_step(x_k, delta_x, norm_F, residual_at)
+            accepted_delta = x_next - x_k
+            x_k = x_next
+            if next_norm < f_tol:
+                converged = True
+                break
+            if step_scale == 0.0:
+                error_handler(f"NR_CONVERGENCE: Newton step could not reduce residual at t={t_points[step]:.2e}, iter={iteration}")
+            if np.linalg.norm(accepted_delta) < v_tol:
                 converged = True
                 break
 
@@ -1157,7 +1344,9 @@ def solve_ac(
 
     solver_f_str = problem.solver_f_str if problem.solver_f_str is not None else problem.f_str
     level1_devices = problem.level1_mos_devices
-    if is_nonlinear(solver_f_str) or level1_devices:
+    level1_bjt_devices = problem.level1_bjt_devices
+    spectrum_metadata: dict[str, object] = {}
+    if is_nonlinear(solver_f_str) or level1_devices or level1_bjt_devices:
         dc_solution = solve_dc_nr(
             problem.G,
             solver_f_str,
@@ -1170,12 +1359,26 @@ def solve_ac(
             krylov_method=krylov_method,
             krylov_stats=krylov_stats,
             level1_mos_devices=level1_devices,
+            level1_bjt_devices=level1_bjt_devices,
         )
-        f_func, Jf_func = compile_nl_functions(solver_f_str, problem.G.shape[0], level1_mos_devices=level1_devices)
+        f_func, Jf_func = compile_nl_functions(
+            solver_f_str,
+            problem.G.shape[0],
+            level1_mos_devices=level1_devices,
+            level1_bjt_devices=level1_bjt_devices,
+        )
         jacobian = np.asarray(Jf_func(*dc_solution.flatten()), dtype=float)
         G_linearized = problem.G + jacobian
+        spectrum_metadata["op_used"] = True
+        spectrum_metadata["operating_point"] = {
+            "labels": problem.metadata["labels"],
+            "values": np.asarray(dc_solution).flatten().tolist(),
+        }
+        spectrum_metadata["linearized_device_count"] = len(level1_devices) + len(level1_bjt_devices)
     else:
         G_linearized = problem.G
+        spectrum_metadata["op_used"] = False
+        spectrum_metadata["linearized_device_count"] = 0
 
     frequencies = np.linspace(f_start, f_stop, points)
     responses = np.zeros((problem.G.shape[0], points))
@@ -1200,7 +1403,12 @@ def solve_ac(
             raise exc
         responses[:, index] = np.abs(solution.flatten())
 
-    return SpectrumResult(frequencies=frequencies, magnitudes=responses, labels=problem.metadata["labels"])
+    return SpectrumResult(
+        frequencies=frequencies,
+        magnitudes=responses,
+        labels=problem.metadata["labels"],
+        metadata=spectrum_metadata,
+    )
 
 
 def create_fourier_matrices(n_harmonics: int, time_points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -1300,7 +1508,8 @@ def solve_harmonic_balance(
 
     solver_f_str = problem.solver_f_str if problem.solver_f_str is not None else problem.f_str
     level1_devices = problem.level1_mos_devices
-    if not is_nonlinear(solver_f_str) and not level1_devices:
+    level1_bjt_devices = problem.level1_bjt_devices
+    if not is_nonlinear(solver_f_str) and not level1_devices and not level1_bjt_devices:
         try:
             return solve_linear(
                 Y_bar,
@@ -1317,7 +1526,12 @@ def solve_harmonic_balance(
             error_handler("HB_ERROR: Linear harmonic solve failed.")
             raise exc
 
-    f_func, Jf_func = compile_nl_functions(solver_f_str, num_vars, level1_mos_devices=level1_devices)
+    f_func, Jf_func = compile_nl_functions(
+        solver_f_str,
+        num_vars,
+        level1_mos_devices=level1_devices,
+        level1_bjt_devices=level1_bjt_devices,
+    )
     x_bar = np.zeros((total_dim, 1))
 
     for _ in range(max_iter):

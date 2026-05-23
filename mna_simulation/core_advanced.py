@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+from math import gcd
 
 from .api.contracts import AnalysisMode, AnalysisOptions, MnaProblem, SimulationResult, SpectrumResult, WaveformResult
 from .errors import error_handler
@@ -18,13 +19,12 @@ def find_gcd_frequency(frequencies: list[float], tolerance: float = 1e-5) -> flo
     if not positive:
         return None
 
-    gcd_value = positive[0]
-    for freq in positive[1:]:
-        value = freq
-        while value > tolerance:
-            gcd_value, value = value, gcd_value % value
-
-    return gcd_value
+    resolution = tolerance
+    scaled = [max(1, int(round(freq / resolution))) for freq in positive]
+    gcd_units = scaled[0]
+    for value in scaled[1:]:
+        gcd_units = gcd(gcd_units, value)
+    return gcd_units * resolution
 
 
 def run_advanced_analysis(problem: MnaProblem, options: AnalysisOptions) -> SimulationResult:

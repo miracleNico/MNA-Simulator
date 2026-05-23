@@ -239,26 +239,56 @@ class Component:
 
     @classmethod
     def _parse_bjt(cls, component: "Component", parts: list[str]) -> None:
+        # Physical Level-1 BJT:
+        #   Q1 collector base emitter QNPN LEVEL1 is bf br vaf var cje cjc rb re rc
+        #   Q1 collector base emitter LEVEL1 is bf br vaf var cje cjc rb re rc
         # Small-signal hybrid-pi BJT:
         #   Q1 collector base emitter QNPN gm rpi [ro cpi cmu ccs rb re]
+        #   Q1 collector base emitter QNPN SMALLSIG gm rpi [ro cpi cmu ccs rb re]
         #   Q1 collector base emitter gm rpi [ro cpi cmu ccs rb re]       (defaults to QNPN)
-        if len(parts) < 6 or len(parts) > 13:
-            error_handler(f"COMPONENT_ERROR: '{component.name}' expected 6 to 13 parts, got {len(parts)}")
+        if len(parts) < 5 or len(parts) > 16:
+            error_handler(f"COMPONENT_ERROR: '{component.name}' expected 5 to 16 parts, got {len(parts)}")
         component.node1 = parts[1]
         component.ctrl_node1 = parts[2]
         component.node2 = parts[3]
         if component.node1 == component.node2:
             error_handler(f"COMPONENT_ERROR: '{component.name}' collector and emitter must be different.")
-        if len(parts) >= 7 and parts[4].upper() in {"QNPN", "QPNP"}:
+        token = parts[4].upper() if len(parts) > 4 else ""
+        if token in {"QNPN", "QPNP"}:
             bjt_type = parts[4].upper()
             component.type = bjt_type
             component.subtype = bjt_type
-            params = parts[5:]
+            cursor = 5
         else:
             component.subtype = component.type or "QNPN"
-            params = parts[4:]
+            cursor = 4
+
+        model_token = parts[cursor].upper() if len(parts) > cursor else ""
+        if model_token == "LEVEL1":
+            defaults = ("1e-15", "150", "3", "100", "25", "4p", "2p", "50", "0.5", "5")
+            params = parts[cursor + 1 :]
+            if len(params) > len(defaults):
+                error_handler(f"COMPONENT_ERROR: '{component.name}' expected up to 10 Level-1 BJT params.")
+            values = list(params) + list(defaults[len(params) :])
+            component.metadata["model"] = "level1"
+            component.value = values[0]
+            component.value2 = values[1]
+            component.value3 = values[2]
+            component.metadata["vaf"] = values[3]
+            component.metadata["var"] = values[4]
+            component.metadata["cje"] = values[5]
+            component.metadata["cjc"] = values[6]
+            component.metadata["rb"] = values[7]
+            component.metadata["re"] = values[8]
+            component.metadata["rc"] = values[9]
+            return
+
+        if model_token in {"SMALLSIG", "SMALL_SIGNAL", "HYBRID_PI"}:
+            cursor += 1
+        params = parts[cursor:]
         if len(params) < 2 or len(params) > 8:
             error_handler(f"COMPONENT_ERROR: '{component.name}' expected gm/rpi plus up to 6 model params.")
+        component.metadata["model"] = "small_signal"
         component.value = params[0]
         component.value2 = params[1]
         component.value3 = params[2] if len(params) >= 3 else "100k"
@@ -275,8 +305,8 @@ class Component:
         # Small-signal MOS:
         #   M1 drain gate source NMOS gm ro cgs cgd [gmb cbs cbd]
         #   M1 drain gate source gm ro cgs cgd      (defaults to NMOS)
-        if len(parts) < 8 or len(parts) > 12:
-            error_handler(f"COMPONENT_ERROR: '{component.name}' expected 8 to 12 parts, got {len(parts)}")
+        if len(parts) < 8 or len(parts) > 13:
+            error_handler(f"COMPONENT_ERROR: '{component.name}' expected 8 to 13 parts, got {len(parts)}")
         component.node1 = parts[1]
         component.ctrl_node1 = parts[2]
         component.node2 = parts[3]
@@ -293,16 +323,25 @@ class Component:
             component.metadata["cgs"] = parts[9]
             component.metadata["cgd"] = parts[10]
             return
-        if len(parts) >= 9 and parts[4].upper() in {"NMOS", "PMOS"}:
+        if len(parts) >= 10 and parts[4].upper() in {"NMOS", "PMOS"} and parts[5].upper() in {"SMALLSIG", "SMALL_SIGNAL"}:
             mos_type = parts[4].upper()
             component.type = mos_type
             component.subtype = mos_type
+            params = parts[6:]
+        elif len(parts) >= 9 and parts[4].upper() in {"NMOS", "PMOS"}:
+            mos_type = parts[4].upper()
+            component.type = mos_type
+            component.subtype = mos_type
+            params = parts[5:]
+        elif len(parts) >= 9 and parts[4].upper() in {"SMALLSIG", "SMALL_SIGNAL"}:
+            component.subtype = component.type or "NMOS"
             params = parts[5:]
         else:
             component.subtype = component.type or "NMOS"
             params = parts[4:]
         if len(params) < 4 or len(params) > 7:
             error_handler(f"COMPONENT_ERROR: '{component.name}' expected gm/ro/cgs/cgd plus up to 3 model params.")
+        component.metadata["model"] = "small_signal"
         component.value = params[0]
         component.value2 = params[1]
         component.value3 = params[2]
@@ -390,18 +429,31 @@ class Component:
             return True
 
         if self.type in {"QNPN", "QPNP"}:
-            if not self.DEPENDENT_VAL_PATTERN.match(self.value or ""):
-                error_handler(f"NETLIST_FATAL: '{self.name}' has invalid gm value '{self.value}'.")
-            if not self.INDEPENDENT_VAL_PATTERN.match(self.value2 or ""):
-                error_handler(f"NETLIST_FATAL: '{self.name}' has invalid rpi value '{self.value2}'.")
-            for label, value in (
-                ("ro", self.value3),
-                ("cpi", self.metadata.get("cpi")),
-                ("cmu", self.metadata.get("cmu")),
-                ("ccs", self.metadata.get("ccs")),
-                ("rb", self.metadata.get("rb")),
-                ("re", self.metadata.get("re")),
-            ):
+            if self.metadata.get("model") == "level1":
+                values = (
+                    ("is", self.value),
+                    ("bf", self.value2),
+                    ("br", self.value3),
+                    ("vaf", self.metadata.get("vaf")),
+                    ("var", self.metadata.get("var")),
+                    ("cje", self.metadata.get("cje")),
+                    ("cjc", self.metadata.get("cjc")),
+                    ("rb", self.metadata.get("rb")),
+                    ("re", self.metadata.get("re")),
+                    ("rc", self.metadata.get("rc")),
+                )
+            else:
+                values = (
+                    ("gm", self.value),
+                    ("rpi", self.value2),
+                    ("ro", self.value3),
+                    ("cpi", self.metadata.get("cpi")),
+                    ("cmu", self.metadata.get("cmu")),
+                    ("ccs", self.metadata.get("ccs")),
+                    ("rb", self.metadata.get("rb")),
+                    ("re", self.metadata.get("re")),
+                )
+            for label, value in values:
                 if value is not None and not self.INDEPENDENT_VAL_PATTERN.match(value):
                     error_handler(f"NETLIST_FATAL: '{self.name}' has invalid {label} value '{value}'.")
             return True

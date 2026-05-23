@@ -120,6 +120,7 @@ def build_mna_problem(circuit: CircuitIR, gmin: float = 0.0) -> MnaProblem:
     b_time_str = np.full((size, 1), "0", dtype=object)
     controlling_branch_map: dict[str, int] = {}
     level1_mos_devices: list[dict[str, float | int | str]] = []
+    level1_bjt_devices: list[dict[str, float | int | str]] = []
 
     def get_index(node_name: str | None) -> int:
         if node_name in {None, "0"}:
@@ -273,6 +274,33 @@ def build_mna_problem(circuit: CircuitIR, gmin: float = 0.0) -> MnaProblem:
             base = get_index(component.ctrl_node1)
             emitter = k
             collector = j
+            if component.metadata.get("model") == "level1":
+                cje = parse_value(component.metadata.get("cje", "4p"))
+                cjc = parse_value(component.metadata.get("cjc", "2p"))
+                level1_bjt_devices.append(
+                    {
+                        "type": comp_type,
+                        "collector": collector,
+                        "base": base,
+                        "emitter": emitter,
+                        "is": parse_value(component.value or "1e-15"),
+                        "bf": parse_value(component.value2 or "150"),
+                        "br": parse_value(component.value3 or "3"),
+                        "vaf": parse_value(component.metadata.get("vaf", "100")),
+                        "var": parse_value(component.metadata.get("var", "25")),
+                        "rb": parse_value(component.metadata.get("rb", "50")),
+                        "re": parse_value(component.metadata.get("re", "0.5")),
+                        "rc": parse_value(component.metadata.get("rc", "5")),
+                    }
+                )
+                if cje > 0.0:
+                    stamp(C, base, emitter, cje)
+                if cjc > 0.0:
+                    stamp(C, base, collector, cjc)
+                if gmin > 0.0:
+                    stamp(G, base, emitter, gmin)
+                    stamp(G, base, collector, gmin)
+                continue
             gm = parse_value(component.value or "40m")
             r_pi = parse_value(component.value2 or "2.5k")
             r_o = parse_value(component.value3 or "100k")
@@ -362,6 +390,8 @@ def build_mna_problem(circuit: CircuitIR, gmin: float = 0.0) -> MnaProblem:
         "matrix_storage": "dense+csr",
         "G_nnz": int(G_csr.nnz),
         "C_nnz": int(C_csr.nnz),
+        "nonlinear_mos_devices": len(level1_mos_devices),
+        "nonlinear_bjt_devices": len(level1_bjt_devices),
     }
 
     return MnaProblem(
@@ -377,6 +407,7 @@ def build_mna_problem(circuit: CircuitIR, gmin: float = 0.0) -> MnaProblem:
         index_map=index_map,
         components=components,
         level1_mos_devices=level1_mos_devices,
+        level1_bjt_devices=level1_bjt_devices,
         gmin=gmin,
         metadata=metadata,
     )

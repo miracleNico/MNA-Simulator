@@ -51,6 +51,26 @@ function pinWire(
   };
 }
 
+const level1BjtMetadata: Record<string, string> = {
+  model: "level1",
+  vaf: "100",
+  var: "25",
+  cje: "4p",
+  cjc: "2p",
+  rb: "50",
+  re: "0.5",
+  rc: "5"
+};
+
+function level1NpnProps(): Pick<CanvasComponent, "value" | "value2" | "value3" | "metadata"> {
+  return {
+    value: "1e-15",
+    value2: "150",
+    value3: "3",
+    metadata: { ...level1BjtMetadata }
+  };
+}
+
 /** Visible-in-the-Preset-dropdown demo schematics. Cleared per user request. */
 export const SCHEMATIC_PRESETS: SchematicPreset[] = [];
 
@@ -58,39 +78,65 @@ export const SCHEMATIC_PRESETS: SchematicPreset[] = [];
 /* Hidden demos accessible only via the Demo top-menu dropdown.            */
 /* ----------------------------------------------------------------------- */
 
-/** CE amp: AC-coupled output so the waveform plots around 0 V, not 12 V. */
+/** CE amp: +15 V biased Level-1 BJT demo with AC-coupled input/output. */
 const ceAmplifier: SchematicPreset = (() => {
   const components: CanvasComponent[] = [
-    mk({ id: "v-in", type: "V", name: "Vin", value: "0.05", subtype: "SIN", value2: "1k", x: 160, y: 296 }),
-    mk({ id: "c-in", type: "C", name: "Cin", value: "10u", x: 300, y: 260 }),
-    mk({ id: "q-1", type: "QNPN", name: "Q1", value: "40m", value2: "2.5k", x: 460, y: 260 }),
-    mk({ id: "r-c", type: "R", name: "Rc", value: "4.7k", x: 460, y: 140, rotation: 90 }),
-    mk({ id: "r-e", type: "R", name: "Re", value: "470", x: 460, y: 360, rotation: 90 }),
-    mk({ id: "c-out", type: "C", name: "Cout", value: "10u", x: 580, y: 224 }),
-    mk({ id: "r-load", type: "R", name: "Rload", value: "10k", x: 700, y: 260, rotation: 90 }),
-    mk({ id: "gnd-1", type: "GND", name: "GND1", value: "0", x: 160, y: 356 }),
-    mk({ id: "gnd-2", type: "GND", name: "GND2", value: "0", x: 460, y: 420 }),
-    mk({ id: "gnd-3", type: "GND", name: "GND3", value: "0", x: 700, y: 320 }),
-    mk({ id: "gnd-4", type: "GND", name: "GND4", value: "0", x: 460, y: 80 })
+    mk({ id: "v-vcc", type: "V", name: "VCC", value: "15", subtype: "DC", x: 160, y: 130 }),
+    mk({ id: "node-vcc-src", type: "NODE", name: "vcc", value: "node", x: 160, y: 94 }),
+    mk({ id: "node-vcc-rc", type: "NODE", name: "vcc", value: "node", x: 500, y: 134 }),
+    mk({ id: "node-vcc-bias", type: "NODE", name: "vcc", value: "node", x: 424, y: 172 }),
+    mk({ id: "v-in", type: "V", name: "Vin", value: "0.02", subtype: "SIN", value2: "1k", x: 160, y: 320 }),
+    mk({ id: "node-vin", type: "NODE", name: "vin", value: "node", x: 240, y: 290 }),
+    mk({ id: "c-in", type: "C", name: "Cin", value: "1u", x: 320, y: 280 }),
+    mk({ id: "node-base", type: "NODE", name: "base", value: "node", x: 424, y: 280 }),
+    mk({
+      id: "q-1",
+      type: "QNPN",
+      name: "Q1",
+      ...level1NpnProps(),
+      x: 500,
+      y: 280
+    }),
+    mk({ id: "r-c", type: "R", name: "Rc", value: "12k", x: 500, y: 170, rotation: 90 }),
+    mk({ id: "r-e", type: "R", name: "Re", value: "330", x: 500, y: 390, rotation: 90 }),
+    mk({ id: "r-btop", type: "R", name: "RbTop", value: "220k", x: 424, y: 208, rotation: 90 }),
+    mk({ id: "r-bbot", type: "R", name: "RbBot", value: "15k", x: 424, y: 352, rotation: 90 }),
+    mk({ id: "c-out", type: "C", name: "Cout", value: "4.7u", x: 640, y: 244 }),
+    mk({ id: "node-out", type: "NODE", name: "out", value: "node", x: 720, y: 260 }),
+    mk({ id: "r-load", type: "R", name: "Rload", value: "10k", x: 760, y: 300, rotation: 90 }),
+    mk({ id: "gnd-vcc", type: "GND", name: "GNDvcc", value: "0", x: 160, y: 190 }),
+    mk({ id: "gnd-in", type: "GND", name: "GNDin", value: "0", x: 160, y: 380 }),
+    mk({ id: "gnd-bias", type: "GND", name: "GNDbias", value: "0", x: 424, y: 430 }),
+    mk({ id: "gnd-e", type: "GND", name: "GNDe", value: "0", x: 500, y: 450 }),
+    mk({ id: "gnd-load", type: "GND", name: "GNDload", value: "0", x: 760, y: 360 })
   ];
   const wires: CanvasWire[] = [
-    pinWire("ce-w1", "v-in", "n", "gnd-1", "g"),
-    pinWire("ce-w2", "v-in", "p", "c-in", "p"),
-    pinWire("ce-w3", "c-in", "n", "q-1", "b"),
-    pinWire("ce-w4", "q-1", "c", "r-c", "n"),
-    pinWire("ce-w5", "r-c", "p", "gnd-4", "g"),
-    pinWire("ce-w7", "q-1", "e", "r-e", "p"),
-    pinWire("ce-w8", "r-e", "n", "gnd-2", "g"),
-    pinWire("ce-w9", "q-1", "c", "c-out", "p"),
-    pinWire("ce-w10", "c-out", "n", "r-load", "p"),
-    pinWire("ce-w11", "r-load", "n", "gnd-3", "g")
+    pinWire("ce-w-vcc-p", "v-vcc", "p", "node-vcc-src", "n"),
+    pinWire("ce-w-vcc-n", "v-vcc", "n", "gnd-vcc", "g"),
+    pinWire("ce-w-in-g", "v-in", "n", "gnd-in", "g"),
+    pinWire("ce-w-in-node", "v-in", "p", "node-vin", "n"),
+    pinWire("ce-w-in-c", "node-vin", "n", "c-in", "p"),
+    pinWire("ce-w-c-base", "c-in", "n", "node-base", "n"),
+    pinWire("ce-w-q-base", "q-1", "b", "node-base", "n"),
+    pinWire("ce-w-btop-vcc", "r-btop", "p", "node-vcc-bias", "n"),
+    pinWire("ce-w-btop-base", "r-btop", "n", "node-base", "n"),
+    pinWire("ce-w-bbot-base", "r-bbot", "p", "node-base", "n"),
+    pinWire("ce-w-bbot-g", "r-bbot", "n", "gnd-bias", "g"),
+    pinWire("ce-w-rc-vcc", "r-c", "p", "node-vcc-rc", "n"),
+    pinWire("ce-w-rc-c", "r-c", "n", "q-1", "c"),
+    pinWire("ce-w-e-re", "q-1", "e", "r-e", "p"),
+    pinWire("ce-w-re-g", "r-e", "n", "gnd-e", "g"),
+    pinWire("ce-w-c-out", "q-1", "c", "c-out", "p"),
+    pinWire("ce-w-out-node", "c-out", "n", "node-out", "n"),
+    pinWire("ce-w-out-load", "node-out", "n", "r-load", "p"),
+    pinWire("ce-w-load-g", "r-load", "n", "gnd-load", "g")
   ];
   return {
     id: "ce-amplifier",
     title: "CE Amplifier",
     description:
-      "Common-emitter NPN small-signal amplifier with AC-grounded collector load and AC-coupled output.",
-    analysis: cloneAnalysis({ mode: "tran", tStop: "5m", tStep: "5u", probeNodes: [] }),
+      "Common-emitter NPN Level-1 amplifier biased from a +15 V rail near mid-collector voltage, with emitter degeneration, junction capacitances, Early effect, and AC-coupled input/output.",
+    analysis: cloneAnalysis({ mode: "tran", tStop: "10m", tStep: "5u", probeNodes: ["V(vin)", "V(out)"] }),
     components,
     wires
   };
@@ -106,18 +152,19 @@ const ceAmplifier: SchematicPreset = (() => {
 
 const threeStageOpamp: SchematicPreset = (() => {
   /*
-   * BJT-only three-stage small-signal demo:
+   * BJT-only three-stage +15 V physical Level-1 demo:
    *
    * 1. Differential input pair: two QNPNs share a tail resistor, each collector
-   *    has an AC-grounded load, and the right collector is the single-ended out.
-   * 2. Common-emitter voltage gain block: QNPN collector output with Rc to AC
-   *    ground and emitter at small-signal ground.
+   *    has a load to the shared +15 V rail, and the right collector is the
+   *    single-ended out.
+   * 2. Common-emitter voltage gain block: QNPN collector output with Rc to
+   *    the +15 V rail and emitter degeneration to ground.
    * 3. Follower output buffer: QNPN emitter follower, the BJT equivalent of the
    *    requested source-follower behavior.
    *
-   * The backend keeps these as QNPN components through subcircuit flattening,
-   * then stamps each BJT as a hybrid-pi small-signal model during MNA assembly.
-   * Local GND components collapse to global small-signal ground.
+   * The backend keeps these as QNPN components through subcircuit flattening.
+   * .op solves the nonlinear bias, .ac linearizes around that bias, and .tran
+   * continues solving nonlinear device currents at each timestep.
    */
   function buildDifferentialStage(): SchematicLevel {
     const prefix = "diff";
@@ -125,31 +172,57 @@ const threeStageOpamp: SchematicPreset = (() => {
       id: "lvl-diff",
       title: "Differential amp",
       parentId: "root",
-      pins: ["in_p", "out", "in_n"],
+      pins: ["in_p", "out", "vcc", "in_n"],
       components: [
-        mk({ id: `${prefix}-port-inp`, type: "NODE", name: "in_p", value: "node", x: 80, y: 240 }),
-        mk({ id: `${prefix}-port-inn`, type: "NODE", name: "in_n", value: "node", x: 80, y: 320 }),
-        mk({ id: `${prefix}-port-out`, type: "NODE", name: "out", value: "node", x: 620, y: 180 }),
-        mk({ id: `${prefix}-q1`, type: "QNPN", name: "Q1", value: "2m", value2: "20k", x: 280, y: 240 }),
-        mk({ id: `${prefix}-q2`, type: "QNPN", name: "Q2", value: "2m", value2: "20k", x: 440, y: 240 }),
-        mk({ id: `${prefix}-rc1`, type: "R", name: "Rc1", value: "6.2k", x: 280, y: 100, rotation: 90 }),
-        mk({ id: `${prefix}-rc2`, type: "R", name: "Rc2", value: "6.2k", x: 440, y: 100, rotation: 90 }),
-        mk({ id: `${prefix}-tail`, type: "R", name: "Rtail", value: "3.3k", x: 360, y: 312, rotation: 90 }),
-        mk({ id: `${prefix}-gnd-c1`, type: "GND", name: "GNDc1", value: "0", x: 280, y: 20 }),
-        mk({ id: `${prefix}-gnd-c2`, type: "GND", name: "GNDc2", value: "0", x: 440, y: 20 }),
-        mk({ id: `${prefix}-gnd-tail`, type: "GND", name: "GNDt", value: "0", x: 360, y: 372 })
+        mk({ id: `${prefix}-port-inp`, type: "NODE", name: "in_p", value: "node", x: 80, y: 260 }),
+        mk({ id: `${prefix}-port-inn`, type: "NODE", name: "in_n", value: "node", x: 80, y: 340 }),
+        mk({ id: `${prefix}-port-vcc`, type: "NODE", name: "vcc", value: "node", x: 380, y: 70 }),
+        mk({ id: `${prefix}-port-out`, type: "NODE", name: "out", value: "node", x: 660, y: 210 }),
+        mk({
+          id: `${prefix}-q1`,
+          type: "QNPN",
+          name: "Q1",
+          ...level1NpnProps(),
+          x: 300,
+          y: 260
+        }),
+        mk({
+          id: `${prefix}-q2`,
+          type: "QNPN",
+          name: "Q2",
+          ...level1NpnProps(),
+          x: 460,
+          y: 260
+        }),
+        mk({ id: `${prefix}-rc1`, type: "R", name: "Rc1", value: "5.6k", x: 300, y: 130, rotation: 90 }),
+        mk({ id: `${prefix}-rc2`, type: "R", name: "Rc2", value: "5.6k", x: 460, y: 130, rotation: 90 }),
+        mk({ id: `${prefix}-tail`, type: "R", name: "Rtail", value: "2.2k", x: 380, y: 360, rotation: 90 }),
+        mk({ id: `${prefix}-rbp-top`, type: "R", name: "RbpTop", value: "150k", x: 180, y: 150, rotation: 90 }),
+        mk({ id: `${prefix}-rbp-bot`, type: "R", name: "RbpBot", value: "20k", x: 180, y: 430, rotation: 90 }),
+        mk({ id: `${prefix}-rbn-top`, type: "R", name: "RbnTop", value: "150k", x: 540, y: 150, rotation: 90 }),
+        mk({ id: `${prefix}-rbn-bot`, type: "R", name: "RbnBot", value: "20k", x: 540, y: 430, rotation: 90 }),
+        mk({ id: `${prefix}-gnd-tail`, type: "GND", name: "GNDt", value: "0", x: 380, y: 420 }),
+        mk({ id: `${prefix}-gnd-bias`, type: "GND", name: "GNDbias", value: "0", x: 360, y: 520 })
       ],
       wires: [
         pinWire(`${prefix}-w-inp`, `${prefix}-q1`, "b", `${prefix}-port-inp`, "n"),
         pinWire(`${prefix}-w-inn`, `${prefix}-q2`, "b", `${prefix}-port-inn`, "n"),
         pinWire(`${prefix}-w-c1`, `${prefix}-q1`, "c", `${prefix}-rc1`, "n"),
         pinWire(`${prefix}-w-c2`, `${prefix}-q2`, "c", `${prefix}-rc2`, "n"),
-        pinWire(`${prefix}-w-rc1-g`, `${prefix}-rc1`, "p", `${prefix}-gnd-c1`, "g"),
-        pinWire(`${prefix}-w-rc2-g`, `${prefix}-rc2`, "p", `${prefix}-gnd-c2`, "g"),
-        { id: `${prefix}-w-e1`, start: pinEndpoint(`${prefix}-q1`, "e"), end: pointEndpoint(360, 276) },
-        { id: `${prefix}-w-e2`, start: pinEndpoint(`${prefix}-q2`, "e"), end: pointEndpoint(360, 276) },
-        { id: `${prefix}-w-tail`, start: pinEndpoint(`${prefix}-tail`, "p"), end: pointEndpoint(360, 276) },
+        pinWire(`${prefix}-w-rc1-vcc`, `${prefix}-rc1`, "p", `${prefix}-port-vcc`, "n"),
+        pinWire(`${prefix}-w-rc2-vcc`, `${prefix}-rc2`, "p", `${prefix}-port-vcc`, "n"),
+        { id: `${prefix}-w-e1`, start: pinEndpoint(`${prefix}-q1`, "e"), end: pointEndpoint(380, 296) },
+        { id: `${prefix}-w-e2`, start: pinEndpoint(`${prefix}-q2`, "e"), end: pointEndpoint(380, 296) },
+        { id: `${prefix}-w-tail`, start: pinEndpoint(`${prefix}-tail`, "p"), end: pointEndpoint(380, 296) },
         pinWire(`${prefix}-w-tail-g`, `${prefix}-tail`, "n", `${prefix}-gnd-tail`, "g"),
+        pinWire(`${prefix}-w-rbp-top-vcc`, `${prefix}-rbp-top`, "p", `${prefix}-port-vcc`, "n"),
+        pinWire(`${prefix}-w-rbp-top-in`, `${prefix}-rbp-top`, "n", `${prefix}-port-inp`, "n"),
+        pinWire(`${prefix}-w-rbp-bot-in`, `${prefix}-rbp-bot`, "p", `${prefix}-port-inp`, "n"),
+        pinWire(`${prefix}-w-rbp-bot-g`, `${prefix}-rbp-bot`, "n", `${prefix}-gnd-bias`, "g"),
+        pinWire(`${prefix}-w-rbn-top-vcc`, `${prefix}-rbn-top`, "p", `${prefix}-port-vcc`, "n"),
+        pinWire(`${prefix}-w-rbn-top-in`, `${prefix}-rbn-top`, "n", `${prefix}-port-inn`, "n"),
+        pinWire(`${prefix}-w-rbn-bot-in`, `${prefix}-rbn-bot`, "p", `${prefix}-port-inn`, "n"),
+        pinWire(`${prefix}-w-rbn-bot-g`, `${prefix}-rbn-bot`, "n", `${prefix}-gnd-bias`, "g"),
         pinWire(`${prefix}-w-out`, `${prefix}-q2`, "c", `${prefix}-port-out`, "n")
       ]
     };
@@ -161,20 +234,36 @@ const threeStageOpamp: SchematicPreset = (() => {
       id: "lvl-mid",
       title: "CE gain stage",
       parentId: "root",
-      pins: ["in", "out"],
+      pins: ["in", "out", "vcc"],
       components: [
         mk({ id: `${prefix}-port-in`, type: "NODE", name: "in", value: "node", x: 80, y: 240 }),
+        mk({ id: `${prefix}-port-vcc`, type: "NODE", name: "vcc", value: "node", x: 300, y: 70 }),
         mk({ id: `${prefix}-port-out`, type: "NODE", name: "out", value: "node", x: 560, y: 180 }),
-        mk({ id: `${prefix}-q1`, type: "QNPN", name: "Q1", value: "3m", value2: "12k", x: 300, y: 240 }),
-        mk({ id: `${prefix}-rc`, type: "R", name: "Rc", value: "5.6k", x: 300, y: 100, rotation: 90 }),
-        mk({ id: `${prefix}-gnd-c`, type: "GND", name: "GNDc", value: "0", x: 300, y: 20 }),
-        mk({ id: `${prefix}-gnd-e`, type: "GND", name: "GNDe", value: "0", x: 300, y: 360 })
+        mk({
+          id: `${prefix}-q1`,
+          type: "QNPN",
+          name: "Q1",
+          ...level1NpnProps(),
+          x: 300,
+          y: 240
+        }),
+        mk({ id: `${prefix}-rc`, type: "R", name: "Rc", value: "12k", x: 300, y: 110, rotation: 90 }),
+        mk({ id: `${prefix}-re`, type: "R", name: "Re", value: "1.5k", x: 300, y: 350, rotation: 90 }),
+        mk({ id: `${prefix}-rbase-top`, type: "R", name: "RbTop", value: "150k", x: 160, y: 150, rotation: 90 }),
+        mk({ id: `${prefix}-rbase-bot`, type: "R", name: "RbBot", value: "20k", x: 160, y: 340, rotation: 90 }),
+        mk({ id: `${prefix}-gnd-e`, type: "GND", name: "GNDe", value: "0", x: 300, y: 410 }),
+        mk({ id: `${prefix}-gnd-bias`, type: "GND", name: "GNDbias", value: "0", x: 160, y: 400 })
       ],
       wires: [
         pinWire(`${prefix}-w-in`, `${prefix}-q1`, "b", `${prefix}-port-in`, "n"),
         pinWire(`${prefix}-w-c`, `${prefix}-q1`, "c", `${prefix}-rc`, "n"),
-        pinWire(`${prefix}-w-rc-g`, `${prefix}-rc`, "p", `${prefix}-gnd-c`, "g"),
-        pinWire(`${prefix}-w-e-g`, `${prefix}-q1`, "e", `${prefix}-gnd-e`, "g"),
+        pinWire(`${prefix}-w-rc-vcc`, `${prefix}-rc`, "p", `${prefix}-port-vcc`, "n"),
+        pinWire(`${prefix}-w-e-re`, `${prefix}-q1`, "e", `${prefix}-re`, "p"),
+        pinWire(`${prefix}-w-re-g`, `${prefix}-re`, "n", `${prefix}-gnd-e`, "g"),
+        pinWire(`${prefix}-w-rbase-top-vcc`, `${prefix}-rbase-top`, "p", `${prefix}-port-vcc`, "n"),
+        pinWire(`${prefix}-w-rbase-top-in`, `${prefix}-rbase-top`, "n", `${prefix}-port-in`, "n"),
+        pinWire(`${prefix}-w-rbase-bot-in`, `${prefix}-rbase-bot`, "p", `${prefix}-port-in`, "n"),
+        pinWire(`${prefix}-w-rbase-bot-g`, `${prefix}-rbase-bot`, "n", `${prefix}-gnd-bias`, "g"),
         pinWire(`${prefix}-w-out`, `${prefix}-q1`, "c", `${prefix}-port-out`, "n")
       ]
     };
@@ -186,20 +275,34 @@ const threeStageOpamp: SchematicPreset = (() => {
       id: "lvl-out",
       title: "Emitter follower",
       parentId: "root",
-      pins: ["in", "out"],
+      pins: ["in", "out", "vcc"],
       components: [
         mk({ id: `${prefix}-port-in`, type: "NODE", name: "in", value: "node", x: 80, y: 220 }),
+        mk({ id: `${prefix}-port-vcc`, type: "NODE", name: "vcc", value: "node", x: 300, y: 80 }),
         mk({ id: `${prefix}-port-out`, type: "NODE", name: "out", value: "node", x: 560, y: 300 }),
-        mk({ id: `${prefix}-q1`, type: "QNPN", name: "Q1", value: "8m", value2: "6k", x: 300, y: 220 }),
-        mk({ id: `${prefix}-re`, type: "R", name: "Re", value: "1k", x: 300, y: 400, rotation: 90 }),
-        mk({ id: `${prefix}-gnd-c`, type: "GND", name: "GNDc", value: "0", x: 300, y: 100 }),
-        mk({ id: `${prefix}-gnd-e`, type: "GND", name: "GNDe", value: "0", x: 300, y: 500 })
+        mk({
+          id: `${prefix}-q1`,
+          type: "QNPN",
+          name: "Q1",
+          ...level1NpnProps(),
+          x: 300,
+          y: 220
+        }),
+        mk({ id: `${prefix}-re`, type: "R", name: "Re", value: "1.2k", x: 300, y: 400, rotation: 90 }),
+        mk({ id: `${prefix}-rbase-top`, type: "R", name: "RbTop", value: "68k", x: 160, y: 150, rotation: 90 }),
+        mk({ id: `${prefix}-rbase-bot`, type: "R", name: "RbBot", value: "75k", x: 160, y: 360, rotation: 90 }),
+        mk({ id: `${prefix}-gnd-e`, type: "GND", name: "GNDe", value: "0", x: 300, y: 500 }),
+        mk({ id: `${prefix}-gnd-bias`, type: "GND", name: "GNDbias", value: "0", x: 160, y: 420 })
       ],
       wires: [
         pinWire(`${prefix}-w-in`, `${prefix}-q1`, "b", `${prefix}-port-in`, "n"),
-        pinWire(`${prefix}-w-c-g`, `${prefix}-q1`, "c", `${prefix}-gnd-c`, "g"),
+        pinWire(`${prefix}-w-c-vcc`, `${prefix}-q1`, "c", `${prefix}-port-vcc`, "n"),
         pinWire(`${prefix}-w-e`, `${prefix}-q1`, "e", `${prefix}-re`, "p"),
         pinWire(`${prefix}-w-re-g`, `${prefix}-re`, "n", `${prefix}-gnd-e`, "g"),
+        pinWire(`${prefix}-w-rbase-top-vcc`, `${prefix}-rbase-top`, "p", `${prefix}-port-vcc`, "n"),
+        pinWire(`${prefix}-w-rbase-top-in`, `${prefix}-rbase-top`, "n", `${prefix}-port-in`, "n"),
+        pinWire(`${prefix}-w-rbase-bot-in`, `${prefix}-rbase-bot`, "p", `${prefix}-port-in`, "n"),
+        pinWire(`${prefix}-w-rbase-bot-g`, `${prefix}-rbase-bot`, "n", `${prefix}-gnd-bias`, "g"),
         pinWire(`${prefix}-w-out`, `${prefix}-q1`, "e", `${prefix}-port-out`, "n")
       ]
     };
@@ -211,17 +314,28 @@ const threeStageOpamp: SchematicPreset = (() => {
 
   /* ------------------- Top level: SUBCKT cascade ----------------------- */
   // SUBCKT pin ordering follows getPinCoordinates. The differential block uses
-  // three pins so in_p sits left, out sits right, and in_n sits on top where the
-  // top level ties it to the local small-signal reference.
+  // four pins so in_p sits left, out sits right, vcc sits on top, and in_n sits
+  // on the bottom where the top level ties it to the local small-signal reference.
   const topComponents: CanvasComponent[] = [
     mk({ id: "v-in", type: "V", name: "Vin", value: "0.001", subtype: "SIN", value2: "1k", x: 120, y: 276 }),
+    mk({ id: "v-vcc", type: "V", name: "VCC", value: "15", subtype: "DC", x: 120, y: 120 }),
+    mk({ id: "c-input", type: "C", name: "Cin", value: "1u", x: 240, y: 276 }),
+    mk({ id: "c-ref", type: "C", name: "Cref", value: "1u", x: 360, y: 380, rotation: 90 }),
+    mk({ id: "c-diff-mid", type: "C", name: "Cdm", value: "1u", x: 500, y: 240 }),
+    mk({ id: "c-mid-out", type: "C", name: "Cmo", value: "1u", x: 760, y: 240 }),
+    mk({ id: "node-vcc-src", type: "NODE", name: "vcc", value: "node", x: 120, y: 84 }),
+    mk({ id: "node-vcc-diff", type: "NODE", name: "vcc", value: "node", x: 360, y: 168 }),
+    mk({ id: "node-vcc-mid", type: "NODE", name: "vcc", value: "node", x: 620, y: 168 }),
+    mk({ id: "node-vcc-out", type: "NODE", name: "vcc", value: "node", x: 880, y: 168 }),
+    mk({ id: "node-vin", type: "NODE", name: "vin", value: "node", x: 180, y: 246 }),
+    mk({ id: "node-out", type: "NODE", name: "out", value: "node", x: 1000, y: 276 }),
     mk({
       id: "sub-diff",
       type: "SUBCKT",
       name: "DiffAmp",
       value: "",
       subcircuitId: "lvl-diff",
-      pins: ["in_p", "out", "in_n"],
+      pins: ["in_p", "out", "vcc", "in_n"],
       x: 360,
       y: 240
     }),
@@ -231,7 +345,7 @@ const threeStageOpamp: SchematicPreset = (() => {
       name: "MidStage",
       value: "",
       subcircuitId: "lvl-mid",
-      pins: ["in", "out"],
+      pins: ["in", "out", "vcc"],
       x: 620,
       y: 240
     }),
@@ -241,13 +355,14 @@ const threeStageOpamp: SchematicPreset = (() => {
       name: "OutStage",
       value: "",
       subcircuitId: "lvl-out",
-      pins: ["in", "out"],
+      pins: ["in", "out", "vcc"],
       x: 880,
       y: 240
     }),
     mk({ id: "r-load", type: "R", name: "Rload", value: "10k", x: 1080, y: 276, rotation: 90 }),
+    mk({ id: "gnd-vcc", type: "GND", name: "GNDvcc", value: "0", x: 120, y: 180 }),
     mk({ id: "gnd-in", type: "GND", name: "GNDi", value: "0", x: 120, y: 360 }),
-    mk({ id: "gnd-ref", type: "GND", name: "GNDref", value: "0", x: 360, y: 100 }),
+    mk({ id: "gnd-ref", type: "GND", name: "GNDref", value: "0", x: 360, y: 460 }),
     mk({ id: "gnd-load", type: "GND", name: "GNDl", value: "0", x: 1080, y: 336 })
   ];
 
@@ -255,14 +370,23 @@ const threeStageOpamp: SchematicPreset = (() => {
   // through explicit points so the SUBCKT flattener can stitch both block pins
   // onto the same top-level net.
   const topWires: CanvasWire[] = [
+    pinWire("op-w-vcc-p", "v-vcc", "p", "node-vcc-src", "n"),
+    pinWire("op-w-vcc-n", "v-vcc", "n", "gnd-vcc", "g"),
+    pinWire("op-w-vcc-diff", "sub-diff", "vcc", "node-vcc-diff", "n"),
+    pinWire("op-w-vcc-mid", "sub-mid", "vcc", "node-vcc-mid", "n"),
+    pinWire("op-w-vcc-out", "sub-out", "vcc", "node-vcc-out", "n"),
     pinWire("op-w1", "v-in", "n", "gnd-in", "g"),
-    pinWire("op-w2", "v-in", "p", "sub-diff", "in_p"),
-    pinWire("op-w3", "sub-diff", "in_n", "gnd-ref", "g"),
-    { id: "op-w4a", start: pinEndpoint("sub-diff", "out"), end: pointEndpoint(500, 240) },
-    { id: "op-w4b", start: pointEndpoint(500, 240), end: pinEndpoint("sub-mid", "in") },
-    { id: "op-w5a", start: pinEndpoint("sub-mid", "out"), end: pointEndpoint(760, 240) },
-    { id: "op-w5b", start: pointEndpoint(760, 240), end: pinEndpoint("sub-out", "in") },
-    pinWire("op-w6", "sub-out", "out", "r-load", "p"),
+    pinWire("op-w2a", "v-in", "p", "node-vin", "n"),
+    pinWire("op-w2c", "node-vin", "n", "c-input", "p"),
+    pinWire("op-w2b", "c-input", "n", "sub-diff", "in_p"),
+    pinWire("op-w3a", "sub-diff", "in_n", "c-ref", "p"),
+    pinWire("op-w3b", "c-ref", "n", "gnd-ref", "g"),
+    pinWire("op-w4a", "sub-diff", "out", "c-diff-mid", "p"),
+    pinWire("op-w4b", "c-diff-mid", "n", "sub-mid", "in"),
+    pinWire("op-w5a", "sub-mid", "out", "c-mid-out", "p"),
+    pinWire("op-w5b", "c-mid-out", "n", "sub-out", "in"),
+    pinWire("op-w6", "sub-out", "out", "node-out", "n"),
+    pinWire("op-w6b", "node-out", "n", "r-load", "p"),
     pinWire("op-w7", "r-load", "n", "gnd-load", "g")
   ];
 
@@ -270,11 +394,64 @@ const threeStageOpamp: SchematicPreset = (() => {
     id: "three-stage-opamp",
     title: "3-Stage Op-Amp (SUBCKT)",
     description:
-      "Top level shows three BJT SUBCKT blocks: a differential pair, common-emitter gain stage, and emitter-follower buffer tuned to about 50 V/V.",
-    analysis: cloneAnalysis({ mode: "tran", tStop: "5m", tStep: "5u", probeNodes: [] }),
+      "Top level shows three AC-coupled +15 V Level-1 BJT SUBCKT blocks, each with its own bias network; .op bias and nonlinear transient are used before small-signal AC linearization.",
+    analysis: cloneAnalysis({ mode: "tran", tStop: "10m", tStep: "5u", probeNodes: ["V(vin)", "V(out)"] }),
     components: topComponents,
     wires: topWires,
     extraLevels: [lvlDiff, lvlMid, lvlOut]
+  };
+})();
+
+const hbCloseToneMixer: SchematicPreset = (() => {
+  const components: CanvasComponent[] = [
+    mk({ id: "hb-node-mix", type: "NODE", name: "mix", value: "node", x: 360, y: 116 }),
+    mk({ id: "hb-node-env", type: "NODE", name: "env", value: "node", x: 680, y: 116 }),
+    mk({ id: "hb-i-bias", type: "I", name: "IBIAS", value: "50u", subtype: "DC", x: 120, y: 200 }),
+    mk({ id: "hb-i-tone-a", type: "I", name: "I1", value: "40u", subtype: "SIN", value2: "1G", x: 230, y: 200 }),
+    mk({ id: "hb-i-tone-b", type: "I", name: "I2", value: "40u", subtype: "SIN", value2: "1.005G", x: 340, y: 200 }),
+    mk({ id: "hb-r-load", type: "R", name: "RLOAD", value: "10k", x: 450, y: 200, rotation: 90 }),
+    mk({ id: "hb-d-mix", type: "D", name: "D1", value: "1e-12", x: 560, y: 200, rotation: 90 }),
+    mk({ id: "hb-g-env", type: "VCCS", name: "GENV", value: "1m", x: 620, y: 180 }),
+    mk({ id: "hb-l-env", type: "L", name: "LENV", value: "1u", x: 700, y: 210, rotation: 90 }),
+    mk({ id: "hb-c-env", type: "C", name: "CENV", value: "1.013n", x: 780, y: 210, rotation: 90 }),
+    mk({ id: "hb-r-q", type: "R", name: "RQ", value: "4.3k", x: 860, y: 210, rotation: 90 }),
+    mk({ id: "hb-gnd", type: "GND", name: "GND", value: "0", x: 440, y: 320 })
+  ];
+  const wires: CanvasWire[] = [
+    pinWire("hb-w-mix-bias", "hb-i-bias", "p", "hb-node-mix", "n"),
+    pinWire("hb-w-mix-a", "hb-i-tone-a", "p", "hb-node-mix", "n"),
+    pinWire("hb-w-mix-b", "hb-i-tone-b", "p", "hb-node-mix", "n"),
+    pinWire("hb-w-mix-r", "hb-r-load", "p", "hb-node-mix", "n"),
+    pinWire("hb-w-mix-d", "hb-d-mix", "p", "hb-node-mix", "n"),
+    pinWire("hb-w-g-ctrl", "hb-g-env", "cp", "hb-node-mix", "n"),
+    pinWire("hb-w-env-g", "hb-g-env", "p", "hb-node-env", "n"),
+    pinWire("hb-w-env-l", "hb-l-env", "p", "hb-node-env", "n"),
+    pinWire("hb-w-env-c", "hb-c-env", "p", "hb-node-env", "n"),
+    pinWire("hb-w-env-rq", "hb-r-q", "p", "hb-node-env", "n"),
+    pinWire("hb-w-g-bias", "hb-i-bias", "n", "hb-gnd", "g"),
+    pinWire("hb-w-g-a", "hb-i-tone-a", "n", "hb-gnd", "g"),
+    pinWire("hb-w-g-b", "hb-i-tone-b", "n", "hb-gnd", "g"),
+    pinWire("hb-w-g-r", "hb-r-load", "n", "hb-gnd", "g"),
+    pinWire("hb-w-g-d", "hb-d-mix", "n", "hb-gnd", "g"),
+    pinWire("hb-w-g-gout", "hb-g-env", "n", "hb-gnd", "g"),
+    pinWire("hb-w-g-gctrl", "hb-g-env", "cn", "hb-gnd", "g"),
+    pinWire("hb-w-g-l", "hb-l-env", "n", "hb-gnd", "g"),
+    pinWire("hb-w-g-c", "hb-c-env", "n", "hb-gnd", "g"),
+    pinWire("hb-w-g-rq", "hb-r-q", "n", "hb-gnd", "g")
+  ];
+  return {
+    id: "hb-close-tone-mixer",
+    title: "HB GHz Close-Tone Mixer",
+    description:
+      "Nonlinear diode mixer driven by 1 GHz and 1.005 GHz tones with a high-Q 5 MHz envelope tank that rings for 40+ beat periods; HB jumps to the steady-state beat.",
+    analysis: cloneAnalysis({
+      mode: "hb",
+      harmonics: 205,
+      hbTimeWindow: "200n",
+      probeNodes: ["V(mix)", "V(env)"]
+    }),
+    components,
+    wires
   };
 })();
 
@@ -285,14 +462,130 @@ const largeSramCircuit: SchematicPreset = (() => {
   const selectedCol = 4;
   const components: CanvasComponent[] = [];
   const wires: CanvasWire[] = [];
+  const sharedNodes = new Map<string, string>();
   let nodeIndex = 0;
   let wireIndex = 0;
   const vHigh = "1.2";
   const mosCap = { cgs: "2f", cgd: "1f" };
+  const cellPins = ["bl", "q", "wl", "blb", "qb", "vdd", "gnd", "init_q", "init_qb"];
   const wlSelectedExpr = `Piecewise((0, t < 1e-9), (${vHigh}, t < 2.5e-9), (0, t < 4.5e-9), (${vHigh}, t < 6e-9), (0, True))`;
   const writeExpr = `Piecewise((0, t < 1e-9), (${vHigh}, t < 2.5e-9), (0, True))`;
   const writeBarExpr = `Piecewise((${vHigh}, t < 1e-9), (0, t < 2.5e-9), (${vHigh}, True))`;
   const prechargeExpr = `Piecewise((0, t < 1e-9), (${vHigh}, t < 3.5e-9), (0, t < 4.5e-9), (${vHigh}, True))`;
+
+  function buildSramCellLevel(): SchematicLevel {
+    const cellComponents: CanvasComponent[] = [];
+    const cellWires: CanvasWire[] = [];
+    let localWireIndex = 0;
+
+    const addCellComponent = (
+      partial: Omit<CanvasComponent, "rotation"> & Partial<Pick<CanvasComponent, "rotation">>
+    ) => {
+      const component = mk(partial);
+      cellComponents.push(component);
+      return component.id;
+    };
+    const addCellPort = (name: string, x: number, y: number) =>
+      addCellComponent({
+        id: `sram-cell-port-${name}`,
+        type: "NODE",
+        name,
+        value: "node",
+        x,
+        y
+      });
+    const connectCell = (componentId: string, pin: string, nodeId: string) => {
+      cellWires.push(pinWire(`sram-cell-w-${localWireIndex++}`, componentId, pin, nodeId, "n"));
+    };
+    const addCellLevel1Mos = (
+      id: string,
+      type: "NMOS" | "PMOS",
+      name: string,
+      beta: string,
+      x: number,
+      y: number,
+      rotation: 0 | 90 | 180 | 270 = 0
+    ) =>
+      addCellComponent({
+        id,
+        type,
+        name,
+        value: beta,
+        value2: "0.4",
+        value3: "0.02",
+        metadata: { model: "level1", ...mosCap },
+        x,
+        y,
+        rotation
+      });
+    const addCellTwoTerminal = (
+      id: string,
+      type: "R" | "C",
+      name: string,
+      value: string,
+      pNode: string,
+      nNode: string,
+      x: number,
+      y: number,
+      rotation: 0 | 90 | 180 | 270 = 0
+    ) => {
+      const componentId = addCellComponent({ id, type, name, value, x, y, rotation });
+      connectCell(componentId, "p", pNode);
+      connectCell(componentId, "n", nNode);
+    };
+
+    const bl = addCellPort("bl", 80, 300);
+    const q = addCellPort("q", 330, 300);
+    const wl = addCellPort("wl", 450, 460);
+    const blb = addCellPort("blb", 820, 300);
+    const qb = addCellPort("qb", 570, 300);
+    const vdd = addCellPort("vdd", 450, 70);
+    const gnd = addCellPort("gnd", 450, 530);
+    const initQ = addCellPort("init_q", 240, 120);
+    const initQb = addCellPort("init_qb", 660, 120);
+
+    const pLeft = addCellLevel1Mos("sram-cell-mp-q", "PMOS", "MPQ", "0.7m", 330, 180);
+    const pRight = addCellLevel1Mos("sram-cell-mp-qb", "PMOS", "MPQB", "0.7m", 570, 180);
+    const nLeft = addCellLevel1Mos("sram-cell-mn-q", "NMOS", "MNQ", "1.8m", 330, 420);
+    const nRight = addCellLevel1Mos("sram-cell-mn-qb", "NMOS", "MNQB", "1.8m", 570, 420);
+    const accessLeft = addCellLevel1Mos("sram-cell-max-q", "NMOS", "MAXQ", "2.5m", 190, 300, 90);
+    const accessRight = addCellLevel1Mos("sram-cell-max-qb", "NMOS", "MAXQB", "2.5m", 710, 300, 270);
+
+    connectCell(pLeft, "s", vdd);
+    connectCell(pLeft, "d", q);
+    connectCell(pLeft, "g", qb);
+    connectCell(nLeft, "d", q);
+    connectCell(nLeft, "s", gnd);
+    connectCell(nLeft, "g", qb);
+
+    connectCell(pRight, "s", vdd);
+    connectCell(pRight, "d", qb);
+    connectCell(pRight, "g", q);
+    connectCell(nRight, "d", qb);
+    connectCell(nRight, "s", gnd);
+    connectCell(nRight, "g", q);
+
+    connectCell(accessLeft, "d", q);
+    connectCell(accessLeft, "s", bl);
+    connectCell(accessLeft, "g", wl);
+    connectCell(accessRight, "d", qb);
+    connectCell(accessRight, "s", blb);
+    connectCell(accessRight, "g", wl);
+
+    addCellTwoTerminal("sram-cell-c-q", "C", "CQ", "4f", q, gnd, 390, 365, 90);
+    addCellTwoTerminal("sram-cell-c-qb", "C", "CQB", "4f", qb, gnd, 510, 365, 90);
+    addCellTwoTerminal("sram-cell-rinit-q", "R", "RINITQ", "200Meg", q, initQ, 250, 210, 90);
+    addCellTwoTerminal("sram-cell-rinit-qb", "R", "RINITQB", "200Meg", qb, initQb, 650, 210, 90);
+
+    return {
+      id: "lvl-sram-cell",
+      title: "SRAM 6T Cell",
+      parentId: "root",
+      pins: cellPins,
+      components: cellComponents,
+      wires: cellWires
+    };
+  }
 
   const addComponent = (
     partial: Omit<CanvasComponent, "rotation"> & Partial<Pick<CanvasComponent, "rotation">>
@@ -310,13 +603,21 @@ const largeSramCircuit: SchematicPreset = (() => {
       x,
       y
     });
+  const addSharedNode = (name: string, x: number, y: number) => {
+    const key = name.trim();
+    const existing = sharedNodes.get(key);
+    if (existing) return existing;
+    const nodeId = addNode(name, x, y);
+    sharedNodes.set(key, nodeId);
+    return nodeId;
+  };
   const connect = (componentId: string, pin: string, nodeId: string) => {
     wires.push(pinWire(`sram-w-${wireIndex++}`, componentId, pin, nodeId, "n"));
   };
   const addSource = (id: string, name: string, node: string, subtype: string, value: string, expr: string | undefined, x: number, y: number) => {
     const src = addComponent({ id, type: "V", name, value, subtype, value2: expr, x, y });
-    const p = addNode(node, x, y - 36);
-    const n = addNode("gnd", x, y + 36);
+    const p = addSharedNode(node, x, y - 36);
+    const n = addSharedNode("gnd", x, y + 36);
     connect(src, "p", p);
     connect(src, "n", n);
     return p;
@@ -359,6 +660,34 @@ const largeSramCircuit: SchematicPreset = (() => {
     connect(c, "n", nNode);
     return c;
   };
+  const addSramCell = (row: number, col: number, x: number, y: number) => {
+    const cell = `${row}_${col}`;
+    const componentId = addComponent({
+      id: `sram-cell-${cell}`,
+      type: "SUBCKT",
+      name: `Cell_${cell}`,
+      value: "",
+      subcircuitId: "lvl-sram-cell",
+      pins: cellPins,
+      x,
+      y
+    });
+    const qStartsHigh = row === selectedRow && col === selectedCol ? false : (row + col) % 2 === 0;
+    const pinNodes: Record<string, string> = {
+      bl: addSharedNode(`bl_${col}`, x - 102, y - 36),
+      q: addSharedNode(`q_${cell}`, x - 102, y),
+      wl: addSharedNode(`wl_${row}`, x - 102, y + 36),
+      blb: addSharedNode(`blb_${col}`, x + 102, y - 36),
+      qb: addSharedNode(`qb_${cell}`, x + 102, y),
+      vdd: addSharedNode("vdd", x + 102, y + 36),
+      gnd: addSharedNode("gnd", x - 36, y - 102),
+      init_q: addSharedNode(qStartsHigh ? "vdd" : "gnd", x, y - 102),
+      init_qb: addSharedNode(qStartsHigh ? "gnd" : "vdd", x + 36, y - 102)
+    };
+    for (const pin of cellPins) {
+      connect(componentId, pin, pinNodes[pin]);
+    }
+  };
 
   const vddSource = addComponent({
     id: "sram-vdd-src",
@@ -369,17 +698,17 @@ const largeSramCircuit: SchematicPreset = (() => {
     x: 100,
     y: 150
   });
-  const vddNode = addNode("vdd", 100, 114);
-  const globalGndNode = addNode("gnd", 100, 186);
+  const vddNode = addSharedNode("vdd", 100, 114);
+  const globalGndNode = addSharedNode("gnd", 100, 186);
   const globalGnd = addComponent({ id: "sram-gnd", type: "GND", name: "GND0", value: "0", x: 100, y: 246 });
   connect(vddSource, "p", vddNode);
   connect(vddSource, "n", globalGndNode);
   wires.push(pinWire(`sram-w-${wireIndex++}`, globalGndNode, "n", globalGnd, "g"));
 
-  const originX = 260;
-  const originY = 250;
-  const cellW = 170;
-  const cellH = 125;
+  const originX = 280;
+  const originY = 280;
+  const cellW = 190;
+  const cellH = 165;
 
   addSource("sram-vpch", "VPCH", "pch", "FUNC", "0", prechargeExpr, 100, 330);
   addSource("sram-vwr", "VWR", "wr", "FUNC", "0", writeExpr, 100, 430);
@@ -388,14 +717,14 @@ const largeSramCircuit: SchematicPreset = (() => {
   for (let col = 0; col < cols; col++) {
     const qX = originX + col * cellW;
     const qbX = qX + 80;
-    const bl = addNode(`bl_${col}`, qX - 72, 118);
-    const blb = addNode(`blb_${col}`, qbX + 72, 118);
-    const vddBl = addNode("vdd", qX - 72, 46);
-    const vddBlb = addNode("vdd", qbX + 72, 46);
-    const pch = addNode("pch", qX, 58);
-    const pchb = addNode("pch", qbX, 58);
-    const gndBl = addNode("gnd", qX - 32, 154);
-    const gndBlb = addNode("gnd", qbX + 32, 154);
+    const bl = addSharedNode(`bl_${col}`, qX - 72, 118);
+    const blb = addSharedNode(`blb_${col}`, qbX + 72, 118);
+    const vddBl = addSharedNode("vdd", qX - 72, 46);
+    const vddBlb = addSharedNode("vdd", qbX + 72, 46);
+    const pch = addSharedNode("pch", qX, 58);
+    const pchb = addSharedNode("pch", qbX, 58);
+    const gndBl = addSharedNode("gnd", qX - 32, 154);
+    const gndBlb = addSharedNode("gnd", qbX + 32, 154);
     const preBl = addLevel1Mos(`sram-mpch-bl-${col}`, "PMOS", `MPCHBL${col}`, "3m", qX - 72, 82);
     const preBlb = addLevel1Mos(`sram-mpch-blb-${col}`, "PMOS", `MPCHBLB${col}`, "3m", qbX + 72, 82);
     connect(preBl, "s", vddBl);
@@ -417,12 +746,12 @@ const largeSramCircuit: SchematicPreset = (() => {
     }
   }
 
-  const selectedBl = addNode(`bl_${selectedCol}`, originX + selectedCol * cellW - 72, 176);
-  const selectedBlb = addNode(`blb_${selectedCol}`, originX + selectedCol * cellW + 152, 176);
-  const writeHighVdd = addNode("vdd", originX + selectedCol * cellW - 112, 176);
-  const writeLowGnd = addNode("gnd", originX + selectedCol * cellW + 192, 176);
-  const wr = addNode("wr", originX + selectedCol * cellW + 152, 226);
-  const wrb = addNode("wr_b", originX + selectedCol * cellW - 72, 226);
+  const selectedBl = addSharedNode(`bl_${selectedCol}`, originX + selectedCol * cellW - 72, 176);
+  const selectedBlb = addSharedNode(`blb_${selectedCol}`, originX + selectedCol * cellW + 152, 176);
+  const writeHighVdd = addSharedNode("vdd", originX + selectedCol * cellW - 112, 176);
+  const writeLowGnd = addSharedNode("gnd", originX + selectedCol * cellW + 192, 176);
+  const wr = addSharedNode("wr", originX + selectedCol * cellW + 152, 226);
+  const wrb = addSharedNode("wr_b", originX + selectedCol * cellW - 72, 226);
   const writeHigh = addLevel1Mos("sram-mwrite-bl", "PMOS", "MWRBL", "8m", originX + selectedCol * cellW - 72, 210);
   const writeLow = addLevel1Mos("sram-mwrite-blb", "NMOS", "MWRBLB", "8m", originX + selectedCol * cellW + 152, 210);
   connect(writeHigh, "s", writeHighVdd);
@@ -436,66 +765,16 @@ const largeSramCircuit: SchematicPreset = (() => {
     for (let col = 0; col < cols; col++) {
       const x = originX + col * cellW;
       const y = originY + row * cellH;
-      const qX = x;
-      const qbX = x + 80;
-      const cell = `${row}_${col}`;
-
-      const q = addNode(`q_${cell}`, qX, y);
-      const qb = addNode(`qb_${cell}`, qbX, y);
-      const vddLeft = addNode("vdd", qX, y - 72);
-      const vddRight = addNode("vdd", qbX, y - 72);
-      const gndLeft = addNode("gnd", qX, y + 72);
-      const gndRight = addNode("gnd", qbX, y + 72);
-      const bl = addNode(`bl_${col}`, qX - 72, y);
-      const blb = addNode(`blb_${col}`, qbX + 72, y);
-      const wlLeft = addNode(`wl_${row}`, qX - 36, y - 36);
-      const wlRight = addNode(`wl_${row}`, qbX + 36, y + 36);
-
-      const pLeft = addLevel1Mos(`sram-mp-q-${cell}`, "PMOS", `MPQ${row}_${col}`, "0.7m", qX, y - 36);
-      const pRight = addLevel1Mos(`sram-mp-qb-${cell}`, "PMOS", `MPQB${row}_${col}`, "0.7m", qbX, y - 36);
-      const nLeft = addLevel1Mos(`sram-mn-q-${cell}`, "NMOS", `MNQ${row}_${col}`, "1.8m", qX, y + 36);
-      const nRight = addLevel1Mos(`sram-mn-qb-${cell}`, "NMOS", `MNQB${row}_${col}`, "1.8m", qbX, y + 36);
-      const accessLeft = addLevel1Mos(`sram-max-q-${cell}`, "NMOS", `MAXQ${row}_${col}`, "2.5m", qX - 36, y, 90);
-      const accessRight = addLevel1Mos(`sram-max-qb-${cell}`, "NMOS", `MAXQB${row}_${col}`, "2.5m", qbX + 36, y, 270);
-
-      connect(pLeft, "s", vddLeft);
-      connect(pLeft, "d", q);
-      connect(pLeft, "g", qb);
-      connect(nLeft, "d", q);
-      connect(nLeft, "s", gndLeft);
-      connect(nLeft, "g", qb);
-
-      connect(pRight, "s", vddRight);
-      connect(pRight, "d", qb);
-      connect(pRight, "g", q);
-      connect(nRight, "d", qb);
-      connect(nRight, "s", gndRight);
-      connect(nRight, "g", q);
-
-      connect(accessLeft, "d", q);
-      connect(accessLeft, "s", bl);
-      connect(accessLeft, "g", wlLeft);
-      connect(accessRight, "d", qb);
-      connect(accessRight, "s", blb);
-      connect(accessRight, "g", wlRight);
-
-      const gndCapQ = addNode("gnd", qX - 16, y + 16);
-      const gndCapQb = addNode("gnd", qbX + 16, y + 16);
-      addTwoTerminal(`sram-cq-${cell}`, "C", `CQ${row}_${col}`, "4f", q, gndCapQ, qX - 16, y + 18, 90);
-      addTwoTerminal(`sram-cqb-${cell}`, "C", `CQB${row}_${col}`, "4f", qb, gndCapQb, qbX + 16, y + 18, 90);
-
-      const qStartsHigh = row === selectedRow && col === selectedCol ? false : (row + col) % 2 === 0;
-      const qBiasNode = addNode(qStartsHigh ? "vdd" : "gnd", qX - 18, y - 18);
-      const qbBiasNode = addNode(qStartsHigh ? "gnd" : "vdd", qbX + 18, y - 18);
-      addTwoTerminal(`sram-rinit-q-${cell}`, "R", `RINITQ${row}_${col}`, "200Meg", q, qBiasNode, qX - 18, y - 18, 90);
-      addTwoTerminal(`sram-rinit-qb-${cell}`, "R", `RINITQB${row}_${col}`, "200Meg", qb, qbBiasNode, qbX + 18, y - 18, 90);
+      addSramCell(row, col, x, y);
     }
   }
 
+  const cellLevel = buildSramCellLevel();
   return {
     id: "large-sram-circuit",
     title: "Large SRAM Circuit",
-    description: "Editable 10x10 6T Level-1 MOS SRAM transient demo that writes, holds, precharges, and reads row 3 column 4.",
+    description:
+      "Hierarchical 10x10 6T Level-1 MOS SRAM transient demo that writes, holds, precharges, and reads row 3 column 4.",
     analysis: cloneAnalysis({
       mode: "tran",
       tStop: "6n",
@@ -505,7 +784,8 @@ const largeSramCircuit: SchematicPreset = (() => {
       krylovRankMode: "auto"
     }),
     components,
-    wires
+    wires,
+    extraLevels: [cellLevel]
   };
 })();
 
@@ -649,9 +929,16 @@ const largeRlcMesh: SchematicPreset = (() => {
   };
 })();
 
-export const HIDDEN_DEMO_PRESETS: SchematicPreset[] = [ceAmplifier, threeStageOpamp, largeSramCircuit, largeRlcMesh];
+export const HIDDEN_DEMO_PRESETS: SchematicPreset[] = [
+  ceAmplifier,
+  threeStageOpamp,
+  hbCloseToneMixer,
+  largeSramCircuit,
+  largeRlcMesh
+];
 
 export const DEMO_MENU_GROUPS: { title: string; presets: SchematicPreset[] }[] = [
   { title: "Amplifier Demos", presets: [ceAmplifier, threeStageOpamp] },
+  { title: "Frequency Domain Demos", presets: [hbCloseToneMixer] },
   { title: "Large Scale Circuits", presets: [largeSramCircuit, largeRlcMesh] }
 ];

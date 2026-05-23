@@ -93,8 +93,8 @@ export function LeftPane(props: Props) {
 
       <CollapsibleSection title="Visualization">
         <div className="hintText">
-          Each simulation opens a plot tile you can drag and resize. Probe mode
-          lets you hover a pin and click it to stream a live scope tile (.dyn mode).
+          Simulations open draggable result tiles. .op shows matrix tables and
+          operating-point lists; waveform analyses use plots.
         </div>
         <div className="formRow" style={{ marginTop: 10 }}>
           <label>Netlist</label>
@@ -669,14 +669,49 @@ function PropertyEditor({
   const isSubckt = component.type === "SUBCKT";
   const isLabel = component.type === "LABEL";
   const isNode = component.type === "NODE";
+  const bjtModel = component.metadata?.model === "small_signal" ? "small_signal" : "level1";
   const mosModel = component.metadata?.model === "level1" ? "level1" : "small_signal";
   const updateMetadata = (key: string, value: string) =>
     onUpdate({ metadata: { ...(component.metadata ?? {}), [key]: value } });
+  const updateBjtModel = (model: "small_signal" | "level1") => {
+    const metadata = { ...(component.metadata ?? {}), model };
+    if (model === "level1") {
+      onUpdate({
+        metadata: {
+          ...metadata,
+          vaf: metadata.vaf ?? "100",
+          var: metadata.var ?? "25",
+          cje: metadata.cje ?? "4p",
+          cjc: metadata.cjc ?? "2p",
+          rb: metadata.rb ?? "50",
+          re: metadata.re ?? "0.5",
+          rc: metadata.rc ?? "5"
+        },
+        value: component.value && component.value !== "40m" ? component.value : "1e-15",
+        value2: component.value2 && component.value2 !== "2.5k" ? component.value2 : "150",
+        value3: component.value3 && component.value3 !== "100k" ? component.value3 : "3"
+      });
+    } else {
+      onUpdate({
+        metadata: {
+          ...metadata,
+          cpi: metadata.cpi ?? "8p",
+          cmu: metadata.cmu ?? "3p",
+          ccs: metadata.ccs ?? "0",
+          rb: metadata.rb ?? "0",
+          re: metadata.re ?? "0"
+        },
+        value: component.value && component.value !== "1e-15" ? component.value : "40m",
+        value2: component.value2 && component.value2 !== "150" ? component.value2 : "2.5k",
+        value3: component.value3 && component.value3 !== "3" ? component.value3 : "100k"
+      });
+    }
+  };
   const updateMosModel = (model: "small_signal" | "level1") => {
     const metadata = { ...(component.metadata ?? {}), model };
     if (model === "level1") {
       onUpdate({
-        metadata: { ...metadata, cgs: metadata.cgs ?? "2f", cgd: metadata.cgd ?? "1f" },
+        metadata: { ...metadata, cgs: metadata.cgs ?? "2p", cgd: metadata.cgd ?? "1p" },
         value: component.value || "1m",
         value2: component.value2 && component.value2 !== "50k" ? component.value2 : "0.4",
         value3: component.value3 && component.value3 !== "5p" ? component.value3 : "0.02"
@@ -777,29 +812,87 @@ function PropertyEditor({
       {isBjt ? (
         <>
           <div className="formRow">
-            <label>gm</label>
-            <input className="input" value={component.value} onChange={(e) => onUpdate({ value: e.target.value })} />
+            <label>model</label>
+            <select
+              className="select"
+              value={bjtModel}
+              onChange={(e) => updateBjtModel(e.target.value as "small_signal" | "level1")}
+            >
+              <option value="level1">Level-1</option>
+              <option value="small_signal">small-signal</option>
+            </select>
           </div>
-          <div className="formRow">
-            <label>rπ</label>
-            <input className="input" value={component.value2 ?? ""} onChange={(e) => onUpdate({ value2: e.target.value })} />
-          </div>
-          <div className="formRow">
-            <label>ro</label>
-            <input className="input" value={component.value3 ?? ""} onChange={(e) => onUpdate({ value3: e.target.value })} />
-          </div>
-          <div className="formRow">
-            <label>Cπ</label>
-            <input className="input" value={component.metadata?.cpi ?? ""} onChange={(e) => updateMetadata("cpi", e.target.value)} />
-          </div>
-          <div className="formRow">
-            <label>Cμ</label>
-            <input className="input" value={component.metadata?.cmu ?? ""} onChange={(e) => updateMetadata("cmu", e.target.value)} />
-          </div>
-          <div className="formRow">
-            <label>Ccs</label>
-            <input className="input" value={component.metadata?.ccs ?? "0"} onChange={(e) => updateMetadata("ccs", e.target.value)} />
-          </div>
+          {bjtModel === "level1" ? (
+            <>
+              <div className="formRow">
+                <label>IS</label>
+                <input className="input" value={component.value} onChange={(e) => onUpdate({ value: e.target.value })} />
+              </div>
+              <div className="formRow">
+                <label>BF</label>
+                <input className="input" value={component.value2 ?? ""} onChange={(e) => onUpdate({ value2: e.target.value })} />
+              </div>
+              <div className="formRow">
+                <label>BR</label>
+                <input className="input" value={component.value3 ?? ""} onChange={(e) => onUpdate({ value3: e.target.value })} />
+              </div>
+              <div className="formRow">
+                <label>VAF</label>
+                <input className="input" value={component.metadata?.vaf ?? ""} onChange={(e) => updateMetadata("vaf", e.target.value)} />
+              </div>
+              <div className="formRow">
+                <label>VAR</label>
+                <input className="input" value={component.metadata?.var ?? ""} onChange={(e) => updateMetadata("var", e.target.value)} />
+              </div>
+              <div className="formRow">
+                <label>Cje</label>
+                <input className="input" value={component.metadata?.cje ?? ""} onChange={(e) => updateMetadata("cje", e.target.value)} />
+              </div>
+              <div className="formRow">
+                <label>Cjc</label>
+                <input className="input" value={component.metadata?.cjc ?? ""} onChange={(e) => updateMetadata("cjc", e.target.value)} />
+              </div>
+              <div className="formRow">
+                <label>Rb</label>
+                <input className="input" value={component.metadata?.rb ?? ""} onChange={(e) => updateMetadata("rb", e.target.value)} />
+              </div>
+              <div className="formRow">
+                <label>Re</label>
+                <input className="input" value={component.metadata?.re ?? ""} onChange={(e) => updateMetadata("re", e.target.value)} />
+              </div>
+              <div className="formRow">
+                <label>Rc</label>
+                <input className="input" value={component.metadata?.rc ?? ""} onChange={(e) => updateMetadata("rc", e.target.value)} />
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="formRow">
+                <label>gm</label>
+                <input className="input" value={component.value} onChange={(e) => onUpdate({ value: e.target.value })} />
+              </div>
+              <div className="formRow">
+                <label>rπ</label>
+                <input className="input" value={component.value2 ?? ""} onChange={(e) => onUpdate({ value2: e.target.value })} />
+              </div>
+              <div className="formRow">
+                <label>ro</label>
+                <input className="input" value={component.value3 ?? ""} onChange={(e) => onUpdate({ value3: e.target.value })} />
+              </div>
+              <div className="formRow">
+                <label>Cπ</label>
+                <input className="input" value={component.metadata?.cpi ?? ""} onChange={(e) => updateMetadata("cpi", e.target.value)} />
+              </div>
+              <div className="formRow">
+                <label>Cμ</label>
+                <input className="input" value={component.metadata?.cmu ?? ""} onChange={(e) => updateMetadata("cmu", e.target.value)} />
+              </div>
+              <div className="formRow">
+                <label>Ccs</label>
+                <input className="input" value={component.metadata?.ccs ?? "0"} onChange={(e) => updateMetadata("ccs", e.target.value)} />
+              </div>
+            </>
+          )}
         </>
       ) : null}
       {isMos ? (
@@ -811,8 +904,8 @@ function PropertyEditor({
               value={mosModel}
               onChange={(e) => updateMosModel(e.target.value as "small_signal" | "level1")}
             >
-              <option value="small_signal">small-signal</option>
               <option value="level1">Level-1</option>
+              <option value="small_signal">small-signal</option>
             </select>
           </div>
           {mosModel === "level1" ? (
@@ -949,6 +1042,14 @@ function PropertyEditor({
           <option value={180}>180°</option>
           <option value={270}>270°</option>
         </select>
+      </div>
+      <div className="formRow">
+        <label>Mirror</label>
+        <input
+          type="checkbox"
+          checked={Boolean(component.mirrored)}
+          onChange={(e) => onUpdate({ mirrored: e.target.checked })}
+        />
       </div>
     </>
   );

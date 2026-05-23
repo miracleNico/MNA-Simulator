@@ -8,6 +8,7 @@ type Props = {
   onToggleProbe: () => void;
   probeMode: boolean;
   onStartDisplay: () => void;
+  onOpenHelp: () => void;
   running: boolean;
 };
 
@@ -90,6 +91,15 @@ export function Toolbar(props: Props) {
           <RunIcon running={props.running} />
           <span className="toolBtn__tip">Display</span>
         </button>
+        <button
+          className="toolBtn"
+          onClick={props.onOpenHelp}
+          title="Open user guide"
+          aria-label="Open user guide"
+        >
+          <HelpIcon />
+          <span className="toolBtn__tip">Help</span>
+        </button>
       </div>
     </div>
   );
@@ -158,6 +168,16 @@ function RunIcon({ running }: { running: boolean }) {
   return (
     <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
       <path d="M6 4l10 6-10 6V4z" />
+    </svg>
+  );
+}
+
+function HelpIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="10" cy="10" r="8" />
+      <path d="M7.7 7.4a2.6 2.6 0 0 1 4.9 1.2c0 1.8-2.1 2.1-2.1 3.4" />
+      <path d="M10 15h.01" />
     </svg>
   );
 }

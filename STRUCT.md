@@ -19,6 +19,10 @@ This document describes the project-authored source, config, docs, and tests. It
 - Project-level usage guide.
 - Covers setup, CLI/API usage, hierarchy behavior, supported devices/modes, tests, and frontend startup.
 
+### `USER_GUIDE.md`
+- User-facing guide for the web app.
+- Mirrors the main topics exposed by the in-app Help dialog: demos, schematic editing, hierarchy, analyses, result display, Krylov controls, raw netlist mode, and troubleshooting.
+
 ### `STRUCT.md`
 - This file-by-file architecture reference.
 
@@ -51,18 +55,19 @@ This document describes the project-authored source, config, docs, and tests. It
 - Parses directives (`.op`, `.tran`, `.ac`, `.hb`) and supported device lines.
 - Preserves FUNC expression tails with spaces instead of splitting them into separate tokens.
 - Supports extended BJT/MOS small-signal parameter forms.
-- Supports physical Level-1 MOS syntax alongside the small-signal MOS syntax.
+- Supports physical Level-1 BJT/MOS syntax alongside small-signal compatibility syntax.
 - Emits backend-neutral `CircuitIR`.
 
 ### `mna_simulation/mna_builder.py`
 - Converts `CircuitIR` to `MnaProblem`.
 - Builds dense and sparse conductance/capacitance matrices, RHS vectors, nonlinear vectors, labels, and branch maps.
 - Stamps passive devices, sources, controlled sources, diodes, BJTs, and MOSFETs.
-- Stamps Level-1 MOS nonlinear device metadata and MOS gate capacitances for transient analysis.
+- Stamps Level-1 BJT/MOS nonlinear device metadata and junction/gate capacitances for transient analysis.
 
 ### `mna_simulation/solvers.py`
 - Numerical solver library.
 - Implements Newton-Raphson DC, Backward-Euler transient, linear AC sweep, harmonic balance, and time reconstruction helpers.
+- Solves physical Level-1 BJT/MOS operating points, linearizes them for `.ac`, and keeps nonlinear device I-V equations active in `.tran`.
 - Implements Krylov routing for Arnoldi/GMRES, MINRES/CR, and Conjugate Gradient.
 - Allows explicit Krylov method overrides even when matrix classification would choose another route.
 - Uses cached sparse CSR Backward-Euler operators for linear transient Krylov runs when sparse MNA matrices are available.
@@ -158,11 +163,16 @@ This document describes the project-authored source, config, docs, and tests. It
 - Expands frontend `NODE` markers into backend `port_<name>` junctions.
 - Repairs stale `SUBCKT` wire endpoint names before sending payloads.
 
+### `app/web/src/lib/userGuide.ts`
+- Structured content for the in-app Help dialog.
+- Covers the same user-facing topics as the root `USER_GUIDE.md`.
+
 ### `app/web/src/lib/demoPresets.ts`
 - Hidden demo schematics.
-- Includes CE amplifier, BJT 3-stage amplifier, 10x10 Level-1 MOS SRAM, and 23x23 RLC mesh demos.
+- Includes CE amplifier, BJT 3-stage amplifier, GHz close-tone HB diode mixer, hierarchical 10x10 Level-1 MOS SRAM, and 23x23 RLC mesh demos.
 - 3-stage amplifier uses real `SUBCKT` child levels and editable `NODE` ports rather than hardcoded fixed port junctions.
-- Large SRAM uses physical 6T cells with FUNC-driven write/hold/read timing.
+- Close-tone HB mixer uses 1 GHz and 1.005 GHz current tones into a nonlinear diode load plus a high-Q 5 MHz envelope tank, so HB exposes the steady-state beat while transient would need 40+ envelope periods to settle.
+- Large SRAM uses a reusable `SRAM 6T Cell` child level with physical Level-1 MOS devices, while the root canvas keeps only array cell instances plus FUNC-driven row/column drivers.
 - Large RLC mesh is sized for roughly 1000 MNA unknowns and sparse Krylov benchmarking.
 
 ### `app/web/src/lib/plot.ts`
@@ -176,6 +186,7 @@ This document describes the project-authored source, config, docs, and tests. It
 ### `app/web/src/components/Toolbar.tsx`
 - Component toolbar.
 - Exposes primitives, controlled sources, transistors, `SUBCKT`, `LABEL`, `NODE`, probe, and run controls.
+- Exposes Help, which opens the detailed user-guide dialog from the toolbar.
 
 ### `app/web/src/components/LeftPane.tsx`
 - Simulation controls, hierarchy tree, library list, and property editor.
@@ -195,6 +206,7 @@ This document describes the project-authored source, config, docs, and tests. It
 ### `app/web/src/pages/App.tsx`
 - Main frontend orchestration component.
 - Owns hierarchy levels, active level, analysis settings, selection, tiles, generated netlist preview, and API calls.
+- Owns the Help dialog state and renders the in-app user guide.
 - Synchronizes child `NODE` port renames to only the matching `SUBCKT` instances.
 - Rewrites stale `SUBCKT` wire endpoints when pins are renamed.
 - Tracks schematic mode versus raw netlist mode and sends the matching API payload.
@@ -215,7 +227,7 @@ This document describes the project-authored source, config, docs, and tests. It
 - Covers FUNC parsing/evaluation and Level-1 MOS behavior.
 
 ### `tests/test_harmonic_balance.py`
-- Harmonic balance regression tests, including frequency handling and reconstruction behavior.
+- Harmonic balance regression tests, including frequency handling, close-tone beat/difference behavior, and reconstruction behavior.
 
 ### `tests/test_schematic_pipeline.py`
 - Schematic conversion and hierarchy tests.
